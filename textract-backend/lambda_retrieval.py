@@ -1,8 +1,8 @@
 """
 Retrieval Lambda
 ----------------
-Triggered by API Gateway GET /document/{document_id}.
-Fetches the OCR result and metadata from DynamoDB (DocumentOCR table).
+GET /document/{document_id}
+Fetches OCR result and metadata from DynamoDB.
 """
 
 from __future__ import annotations
@@ -12,18 +12,15 @@ import logging
 import os
 
 import boto3
-from boto3.dynamodb.conditions import Key
 
-LOGGER = logging.getLogger(__name__)
-LOGGER.setLevel(logging.INFO)
-
+LOGGER       = logging.getLogger(__name__)
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
 
 dynamo = boto3.resource("dynamodb")
-table = dynamo.Table(DYNAMO_TABLE)
+table  = dynamo.Table(DYNAMO_TABLE)
 
 
-def _cors_headers() -> dict[str, str]:
+def _cors_headers() -> dict:
     return {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET,OPTIONS",
@@ -50,14 +47,12 @@ def handler(event: dict, context) -> dict:
         return _response(400, {"detail": "document_id path parameter is required"})
 
     try:
-        response = table.get_item(Key={"document_id": document_id})
-    except Exception as exc:
+        item = table.get_item(Key={"document_id": document_id}).get("Item")
+    except Exception:
         LOGGER.exception("DynamoDB get_item failed for %s", document_id)
         return _response(500, {"detail": "Failed to retrieve document"})
 
-    item = response.get("Item")
     if not item:
         return _response(404, {"detail": f"No document found with id: {document_id}"})
 
-    LOGGER.info("Retrieved document: %s", document_id)
     return _response(200, item)

@@ -1,6 +1,0 @@
-fastapi>=0.110,<1
-uvicorn[standard]>=0.29,<1
-python-multipart>=0.0.9,<1
-Pillow>=10,<12
-PyMuPDF>=1.24,<2
-surya-ocr>=0.22,<1

@@ -1,5 +1,0 @@
-boto3>=1.34,<2
-Pillow>=10,<12
-PyMuPDF==1.24.14
-surya-ocr>=0.22,<1
-python-multipart>=0.0.9,<1
