@@ -1,8 +1,8 @@
 """
 Retrieval Lambda
 ----------------
-GET /document/{document_id}
-Fetches OCR result and metadata from DynamoDB.
+GET /documents              → list all documents (scan DynamoDB, metadata only)
+GET /document/{document_id} → fetch single document with full OCR result
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import logging
 import os
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 
 LOGGER       = logging.getLogger(__name__)
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
@@ -28,7 +29,7 @@ def _cors_headers() -> dict:
     }
 
 
-def _response(status: int, body: dict) -> dict:
+def _response(status: int, body) -> dict:
     return {
         "statusCode": status,
         "headers": {**_cors_headers(), "Content-Type": "application/json"},
@@ -36,18 +37,54 @@ def _response(status: int, body: dict) -> dict:
     }
 
 
+def _list_documents() -> dict:
+    """Scan table returning only metadata fields — no full OCR payload."""
+    items = []
+    kwargs = {
+        "ProjectionExpression": "document_id, filename, total_pages, element_count, uploaded_at, #st",
+        "ExpressionAttributeNames": {"#st": "status"},
+    }
+    while True:
+        response = table.scan(**kwargs)
+        items.extend(response.get("Items", []))
+        if "LastEvaluatedKey" not in response:
+            break
+        kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+
+    # Sort newest first by uploaded_at
+    items.sort(key=lambda x: x.get("uploaded_at", ""), reverse=True)
+    return {"documents": items, "count": len(items)}
+
+
+def _get_document(document_id: str) -> dict:
+    item = table.get_item(Key={"document_id": document_id}).get("Item")
+    if not item:
+        return None
+    return item
+
+
 def handler(event: dict, context) -> dict:
     if event.get("httpMethod") == "OPTIONS":
         return _response(200, {})
 
+    path = event.get("rawPath") or event.get("path") or ""
     path_params = event.get("pathParameters") or {}
-    document_id = path_params.get("document_id", "").strip()
 
+    # GET /documents — list all
+    if path.rstrip("/").endswith("/documents") and not path_params.get("document_id"):
+        try:
+            return _response(200, _list_documents())
+        except Exception:
+            LOGGER.exception("DynamoDB scan failed")
+            return _response(500, {"detail": "Failed to list documents"})
+
+    # GET /document/{document_id} — single
+    document_id = path_params.get("document_id", "").strip()
     if not document_id:
         return _response(400, {"detail": "document_id path parameter is required"})
 
     try:
-        item = table.get_item(Key={"document_id": document_id}).get("Item")
+        item = _get_document(document_id)
     except Exception:
         LOGGER.exception("DynamoDB get_item failed for %s", document_id)
         return _response(500, {"detail": "Failed to retrieve document"})

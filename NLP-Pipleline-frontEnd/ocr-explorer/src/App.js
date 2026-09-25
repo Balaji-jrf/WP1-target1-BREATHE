@@ -3,7 +3,6 @@ import './App.css';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 const ACCEPTED_TYPES = '.png,.jpg,.jpeg,.tif,.tiff,.webp,.pdf';
-const HISTORY_KEY = 'breathe_ocr_history';
 
 function App() {
   const [tab, setTab] = useState('extract');
@@ -13,23 +12,30 @@ function App() {
   const [error, setError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [history, setHistory] = useState([]);
-  const [historyItem, setHistoryItem] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyItem, setHistoryItem] = useState(null);
+  const [historyError, setHistoryError] = useState('');
   const inputRef = useRef(null);
 
-  // Load history from localStorage on mount
-  useEffect(() => {
-    const saved = localStorage.getItem(HISTORY_KEY);
-    if (saved) setHistory(JSON.parse(saved));
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const res = await fetch(`${API_URL}/documents`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to load history');
+      setHistory(data.documents || []);
+    } catch (err) {
+      setHistoryError(err.message);
+    } finally {
+      setHistoryLoading(false);
+    }
   }, []);
 
-  const saveToHistory = useCallback((entry) => {
-    setHistory(prev => {
-      const updated = [entry, ...prev].slice(0, 50);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
+  // Load history from DynamoDB when History tab is opened
+  useEffect(() => {
+    if (tab === 'history') loadHistory();
+  }, [tab, loadHistory]);
 
   const chooseFile = (nextFile) => {
     if (!nextFile) return;
@@ -52,13 +58,6 @@ function App() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || 'OCR processing failed.');
       setResult(payload);
-      saveToHistory({
-        document_id: payload.document_id,
-        filename: payload.filename,
-        total_pages: payload.total_pages,
-        element_count: payload.elements?.length || 0,
-        processed_at: new Date().toISOString(),
-      });
     } catch (err) {
       setError(err.message || 'Could not connect to the OCR service.');
     } finally {
@@ -187,18 +186,20 @@ function App() {
             <div>
               <p className="section-kicker">Document archive</p>
               <h2 className="history-title">Processed Documents</h2>
-              <p className="intro-copy">All documents extracted in this session. Click any entry to reload its full OCR result from the database.</p>
+              <p className="intro-copy">All documents extracted and stored in the database. Click any entry to reload its full OCR result.</p>
             </div>
-            {history.length > 0 && (
-              <button className="clear-btn" onClick={() => { localStorage.removeItem(HISTORY_KEY); setHistory([]); setHistoryItem(null); }}>
-                Clear history
-              </button>
-            )}
+            <button className="clear-btn" onClick={loadHistory} disabled={historyLoading}>
+              {historyLoading ? 'Loading…' : '↻ Refresh'}
+            </button>
           </div>
 
-          {history.length === 0
-            ? <div className="empty-history"><p>No documents processed yet.</p><p>Go to the Extract tab to upload your first document.</p></div>
-            : (
+          {historyError && <div className="message error-message">{historyError}</div>}
+
+          {historyLoading && !history.length
+            ? <div className="empty-history"><p>Loading documents from database…</p></div>
+            : history.length === 0
+              ? <div className="empty-history"><p>No documents in the database yet.</p><p>Go to the Extract tab to upload your first document.</p></div>
+              : (
               <div className="history-grid">
                 {history.map((item) => (
                   <div className="history-card" key={item.document_id} onClick={() => fetchHistoryItem(item.document_id)}>
@@ -208,7 +209,7 @@ function App() {
                     </div>
                     <div className="hcard-meta">
                       <span>{item.element_count} text blocks</span>
-                      <span>{formatDate(item.processed_at)}</span>
+                      <span>{formatDate(item.uploaded_at)}</span>
                     </div>
                     <p className="hcard-id">{item.document_id}</p>
                   </div>
