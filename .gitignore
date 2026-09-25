@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# React build output (Amplify builds this itself)
+NLP-Pipleline-frontEnd/ocr-explorer/build/
+NLP-Pipleline-frontEnd/ocr-explorer/node_modules/
+
+# AWS CLI installer
+awscliv2.zip
+aws/
+
+# Docker
+aws-deployment/__pycache__/
+aws-deployment/.pytest_cache/
+
+# OS
+.DS_Store
