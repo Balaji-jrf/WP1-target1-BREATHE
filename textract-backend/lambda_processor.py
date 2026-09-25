@@ -2,38 +2,43 @@
 Processor Lambda — Amazon Textract Edition
 -------------------------------------------
 POST /process-ocr  (multipart/form-data, field name: file)
-1. Parse uploaded file from API Gateway event
-2. Save raw file to S3
-3. Call Amazon Textract DetectDocumentText
-4. Write result + metadata to DynamoDB
-5. Return OCR JSON to caller
+
+Images (PNG/JPEG/TIFF/WEBP):
+  → Textract DetectDocumentText with Bytes (sync, instant)
+
+PDFs:
+  → Save to S3 → Textract StartDocumentTextDetection (async)
+  → Poll until complete → return results
 """
 
 from __future__ import annotations
 
 import base64
-import io
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from email import message_from_bytes
 
 import boto3
 
-LOGGER = logging.getLogger(__name__)
+LOGGER           = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
-REGION         = os.environ.get("AWS_REGION", "ap-south-1")
-S3_BUCKET      = os.environ.get("S3_BUCKET", "jrf-task-ocr-docs-bucket")
-DYNAMO_TABLE   = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
-MAX_BYTES      = int(os.environ.get("MAX_UPLOAD_MB", "50")) * 1024 * 1024
+S3_BUCKET        = os.environ.get("S3_BUCKET", "jrf-task-ocr-docs-bucket")       # ap-south-2
+S3_TEXTRACT_BUCKET = os.environ.get("S3_TEXTRACT_BUCKET", "jrf-task-ocr-textract-bucket")  # ap-south-1
+DYNAMO_TABLE     = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
+TEXTRACT_REGION  = os.environ.get("TEXTRACT_REGION", "ap-south-1")
+MAX_BYTES        = int(os.environ.get("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 
-s3       = boto3.client("s3")
-textract = boto3.client("textract", region_name="ap-south-1")
-dynamo   = boto3.resource("dynamodb")
-table    = dynamo.Table(DYNAMO_TABLE)
+s3          = boto3.client("s3", region_name="ap-south-2")
+s3_textract = boto3.client("s3", region_name="ap-south-1")
+textract    = boto3.client("textract", region_name=TEXTRACT_REGION)
+dynamo      = boto3.resource("dynamodb", region_name="ap-south-2")
+table       = dynamo.Table(DYNAMO_TABLE)
 
 
 def _cors_headers() -> dict:
@@ -48,7 +53,7 @@ def _response(status: int, body: dict) -> dict:
     return {
         "statusCode": status,
         "headers": {**_cors_headers(), "Content-Type": "application/json"},
-        "body": json.dumps(body),
+        "body": json.dumps(body, default=str),
     }
 
 
@@ -68,25 +73,66 @@ def _parse_multipart(event: dict) -> tuple[bytes, str]:
     raise KeyError("file")
 
 
-def _run_textract(file_bytes: bytes) -> list[dict]:
-    response = textract.detect_document_text(Document={"Bytes": file_bytes})
+def _blocks_to_elements(blocks: list) -> list[dict]:
     elements = []
-    for block in response["Blocks"]:
+    for block in blocks:
         if block["BlockType"] != "LINE":
             continue
         bb = block["Geometry"]["BoundingBox"]
         elements.append({
             "page":       block.get("Page", 1),
             "text":       block["Text"],
-            "confidence": round(block["Confidence"] / 100, 4),
-            "bbox":       [
-                round(bb["Left"], 4),
-                round(bb["Top"], 4),
-                round(bb["Left"] + bb["Width"], 4),
-                round(bb["Top"]  + bb["Height"], 4),
+            "confidence": Decimal(str(round(block["Confidence"] / 100, 4))),
+            "bbox": [
+                Decimal(str(round(bb["Left"], 4))),
+                Decimal(str(round(bb["Top"], 4))),
+                Decimal(str(round(bb["Left"] + bb["Width"], 4))),
+                Decimal(str(round(bb["Top"] + bb["Height"], 4))),
             ],
         })
     return elements
+
+
+def _textract_image(file_bytes: bytes) -> list[dict]:
+    """Sync Textract for images — fast, no S3 needed."""
+    response = textract.detect_document_text(Document={"Bytes": file_bytes})
+    return _blocks_to_elements(response["Blocks"])
+
+
+def _textract_pdf(s3_key: str) -> list[dict]:
+    """Async Textract for PDFs — must use S3 bucket in same region as Textract (ap-south-1)."""
+    # Copy file to ap-south-1 bucket for Textract
+    copy_source = {"Bucket": S3_BUCKET, "Key": s3_key}
+    s3_textract.copy_object(
+        CopySource=copy_source,
+        Bucket=S3_TEXTRACT_BUCKET,
+        Key=s3_key
+    )
+    job = textract.start_document_text_detection(
+        DocumentLocation={"S3Object": {"Bucket": S3_TEXTRACT_BUCKET, "Name": s3_key}}
+    )
+    job_id = job["JobId"]
+    LOGGER.info("Textract job started: %s", job_id)
+
+    # Poll until complete (max 55s — Lambda timeout is 60s)
+    for _ in range(55):
+        time.sleep(1)
+        result = textract.get_document_text_detection(JobId=job_id)
+        status = result["JobStatus"]
+        if status == "SUCCEEDED":
+            blocks = result["Blocks"]
+            # Paginate if needed
+            while "NextToken" in result:
+                result = textract.get_document_text_detection(
+                    JobId=job_id, NextToken=result["NextToken"]
+                )
+                blocks.extend(result["Blocks"])
+            LOGGER.info("Textract job succeeded: %s blocks", len(blocks))
+            return _blocks_to_elements(blocks)
+        if status == "FAILED":
+            raise RuntimeError(f"Textract job failed: {result.get('StatusMessage')}")
+
+    raise TimeoutError("Textract job timed out after 55 seconds")
 
 
 def handler(event: dict, context) -> dict:
@@ -95,7 +141,7 @@ def handler(event: dict, context) -> dict:
 
     try:
         file_bytes, filename = _parse_multipart(event)
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError):
         return _response(400, {"detail": "Invalid multipart/form-data — 'file' field required"})
 
     if not filename:
@@ -104,6 +150,7 @@ def handler(event: dict, context) -> dict:
     if len(file_bytes) > MAX_BYTES:
         return _response(413, {"detail": f"File exceeds {MAX_BYTES // (1024*1024)} MB limit"})
 
+    is_pdf      = filename.lower().endswith(".pdf") or file_bytes.startswith(b"%PDF-")
     document_id = str(uuid.uuid4())
     s3_key      = f"uploads/{document_id}/{filename}"
     timestamp   = datetime.now(timezone.utc).isoformat()
@@ -118,11 +165,12 @@ def handler(event: dict, context) -> dict:
 
     # 2. Run Textract
     try:
-        elements = _run_textract(file_bytes)
-    except textract.exceptions.UnsupportedDocumentException:
-        return _response(415, {"detail": "Unsupported file format. Use PDF, PNG, JPEG, or TIFF."})
-    except textract.exceptions.DocumentTooLargeException:
-        return _response(413, {"detail": "Document too large for Textract (max 10MB for sync API)"})
+        if is_pdf:
+            elements = _textract_pdf(s3_key)
+        else:
+            elements = _textract_image(file_bytes)
+    except TimeoutError:
+        return _response(504, {"detail": "OCR timed out — try a smaller PDF"})
     except Exception:
         LOGGER.exception("Textract failed for %s", filename)
         return _response(500, {"detail": "OCR processing failed"})

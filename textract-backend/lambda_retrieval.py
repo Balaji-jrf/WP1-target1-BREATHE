@@ -16,7 +16,7 @@ import boto3
 LOGGER       = logging.getLogger(__name__)
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
 
-dynamo = boto3.resource("dynamodb")
+dynamo = boto3.resource("dynamodb", region_name="ap-south-2")
 table  = dynamo.Table(DYNAMO_TABLE)
 
 
@@ -32,7 +32,7 @@ def _response(status: int, body: dict) -> dict:
     return {
         "statusCode": status,
         "headers": {**_cors_headers(), "Content-Type": "application/json"},
-        "body": json.dumps(body),
+        "body": json.dumps(body, default=str),
     }
 
 
