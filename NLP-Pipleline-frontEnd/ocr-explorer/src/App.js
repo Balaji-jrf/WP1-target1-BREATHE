@@ -4,6 +4,70 @@ import './App.css';
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 const ACCEPTED_TYPES = '.png,.jpg,.jpeg,.tif,.tiff,.webp,.pdf';
 
+// ── Reusable modal ────────────────────────────────────────────────────────────
+function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">{title}</span>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Result action buttons + modals ────────────────────────────────────────────
+function ResultActions({ result, docUrl }) {
+  const [showDoc, setShowDoc] = useState(false);
+  const [showOcr, setShowOcr] = useState(false);
+  const isPdf = /\.pdf$/i.test(result?.filename || '');
+
+  return (
+    <>
+      <div className="result-actions">
+        {docUrl && (
+          <button className="action-btn" onClick={() => setShowDoc(true)}>⊞ View Doc</button>
+        )}
+        <button className="action-btn" onClick={() => setShowOcr(true)}>{ } View OCR Data</button>
+      </div>
+
+      {showDoc && docUrl && (
+        <Modal title={result.filename} onClose={() => setShowDoc(false)}>
+          <div className="modal-doc-meta">
+            <span>{result.total_pages} page{result.total_pages === 1 ? '' : 's'}</span>
+            <span>{result.elements?.length || 0} text blocks</span>
+            {result.document_id && <span>ID: {result.document_id}</span>}
+            <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open full ↗</a>
+          </div>
+          {isPdf
+            ? <iframe src={docUrl} title="Document" className="modal-iframe" />
+            : <img src={docUrl} alt={result.filename} className="modal-img" />
+          }
+        </Modal>
+      )}
+
+      {showOcr && (
+        <Modal title={`OCR Data — ${result.filename}`} onClose={() => setShowOcr(false)}>
+          <div className="modal-ocr-meta">
+            <span>{result.total_pages} page{result.total_pages === 1 ? '' : 's'}</span>
+            <span>{result.elements?.length || 0} text blocks</span>
+            {result.uploaded_at && <span>{new Date(result.uploaded_at).toLocaleString('en-IN')}</span>}
+          </div>
+          <pre className="modal-json">{JSON.stringify(result, null, 2)}</pre>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState('extract');
   const [file, setFile] = useState(null);
@@ -179,6 +243,7 @@ function App() {
                   }
                 </div>
                 <details className="json-details"><summary>View raw JSON payload <span>+</span></summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
+                <ResultActions result={result} docUrl={null} />
               </section>
             )}
           </section>
@@ -259,6 +324,7 @@ function App() {
                 ))}
               </div>
               <details className="json-details"><summary>View raw JSON payload <span>+</span></summary><pre>{JSON.stringify(historyItem, null, 2)}</pre></details>
+              <ResultActions result={{...historyItem, document_id: historyItem.document_id}} docUrl={docUrl} />
             </section>
           )}
 

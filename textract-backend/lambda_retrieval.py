@@ -62,7 +62,11 @@ def _get_document(document_id: str) -> dict:
         return None
     # Generate a presigned S3 URL valid for 1 hour so frontend can display the file
     try:
-        s3 = boto3.client("s3", region_name="ap-south-2")
+        s3 = boto3.client(
+            "s3",
+            region_name="ap-south-2",
+            endpoint_url="https://s3.ap-south-2.amazonaws.com",
+        )
         url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": item["s3_bucket"], "Key": item["s3_key"]},
