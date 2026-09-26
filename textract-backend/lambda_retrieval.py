@@ -60,6 +60,17 @@ def _get_document(document_id: str) -> dict:
     item = table.get_item(Key={"document_id": document_id}).get("Item")
     if not item:
         return None
+    # Generate a presigned S3 URL valid for 1 hour so frontend can display the file
+    try:
+        s3 = boto3.client("s3", region_name="ap-south-2")
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": item["s3_bucket"], "Key": item["s3_key"]},
+            ExpiresIn=3600,
+        )
+        item["s3_presigned_url"] = url
+    except Exception:
+        LOGGER.warning("Could not generate presigned URL for %s", document_id)
     return item
 
 
@@ -67,11 +78,14 @@ def handler(event: dict, context) -> dict:
     if event.get("httpMethod") == "OPTIONS":
         return _response(200, {})
 
-    path = event.get("rawPath") or event.get("path") or ""
     path_params = event.get("pathParameters") or {}
+    route_key   = event.get("routeKey", "")
+    raw_path    = event.get("rawPath", "")
+
+    LOGGER.info("route=%s path=%s params=%s", route_key, raw_path, path_params)
 
     # GET /documents — list all
-    if path.rstrip("/").endswith("/documents") and not path_params.get("document_id"):
+    if raw_path.rstrip("/").endswith("/documents") or route_key == "GET /documents":
         try:
             return _response(200, _list_documents())
         except Exception:

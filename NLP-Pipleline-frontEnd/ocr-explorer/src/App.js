@@ -15,6 +15,7 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyItem, setHistoryItem] = useState(null);
   const [historyError, setHistoryError] = useState('');
+  const [docUrl, setDocUrl] = useState(null);
   const inputRef = useRef(null);
 
   const loadHistory = useCallback(async () => {
@@ -68,10 +69,12 @@ function App() {
   const fetchHistoryItem = async (document_id) => {
     setHistoryLoading(true);
     setHistoryItem(null);
+    setDocUrl(null);
     try {
       const response = await fetch(`${API_URL}/document/${document_id}`);
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || 'Failed to fetch document.');
+      setDocUrl(payload.s3_presigned_url || null);
       setHistoryItem(payload.ocr_result || payload);
     } catch (err) {
       setHistoryItem({ error: err.message });
@@ -98,6 +101,7 @@ function App() {
           </button>
         </nav>
         <span className="service-status"><span /> Textract ready</span>
+        <span className="service-status nlp-status"><span className="dot-orange" /> NLP Pipeline — ongoing</span>
       </header>
 
       {tab === 'extract' && (
@@ -117,6 +121,7 @@ function App() {
               <strong>01</strong><span>Upload<br />document</span>
               <strong>02</strong><span>Extract<br />text</span>
               <strong>03</strong><span>Feed<br />NLP pipeline</span>
+              <strong>04</strong><span>Going<br />On</span>
             </div>
           </section>
 
@@ -139,7 +144,7 @@ function App() {
                 }
               </div>
               <div className="action-row">
-                <p className="limit-note"><span className="lock-icon">◈</span> Processed via Amazon Textract · stored securely in S3 + DynamoDB</p>
+                <p className="limit-note"><span className="lock-icon">◈</span> Processed via Amazon Textract + NLP Pipeline · Stored securely in S3 + DynamoDB</p>
                 <button className="process-button" type="submit" disabled={!file || loading}>
                   {loading ? <><span className="spinner" /> Extracting text…</> : <>Extract text <span>→</span></>}
                 </button>
@@ -229,6 +234,21 @@ function App() {
                   <span>text blocks<br />across {historyItem.total_pages} page{historyItem.total_pages === 1 ? '' : 's'}</span>
                 </div>
               </div>
+
+              {/* Document viewer */}
+              {docUrl && (
+                <div className="doc-viewer">
+                  <div className="doc-viewer-bar">
+                    <span className="section-kicker">Original document</span>
+                    <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open in new tab ↗</a>
+                  </div>
+                  {/\.pdf$/i.test(historyItem.filename)
+                    ? <iframe src={docUrl} title="Document preview" className="doc-iframe" />
+                    : <img src={docUrl} alt={historyItem.filename} className="doc-img" />
+                  }
+                </div>
+              )}
+
               <div className="result-list">
                 {historyItem.elements?.map((el, i) => (
                   <article className="result-item" key={`h-${el.page}-${i}`}>
@@ -246,9 +266,9 @@ function App() {
         </section>
       )}
 
-      <footer>
+      {/* <footer>
         BREATHE <span>·</span> WP1 NLP PIPELINE <span>·</span> HISTORICAL DOCUMENT OCR <span>·</span> POWERED BY AMAZON TEXTRACT
-      </footer>
+      </footer> */}
     </main>
   );
 }
