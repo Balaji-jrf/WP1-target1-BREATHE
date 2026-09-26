@@ -1,17 +1,18 @@
 version: 1
-frontend:
-  phases:
-    preBuild:
-      commands:
-        - cd NLP-Pipleline-frontEnd/ocr-explorer
-        - npm install
-    build:
-      commands:
-        - npm run build
-  artifacts:
-    baseDirectory: NLP-Pipleline-frontEnd/ocr-explorer/build
-    files:
-      - '**/*'
-  cache:
-    paths:
-      - NLP-Pipleline-frontEnd/ocr-explorer/node_modules/**/*
+applications:
+  - frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm install
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: build
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+    appRoot: NLP-Pipleline-frontEnd/ocr-explorer
