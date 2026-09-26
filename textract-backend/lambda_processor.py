@@ -25,6 +25,16 @@ from email import message_from_bytes
 
 import boto3
 
+CONTENT_TYPES = {
+    ".pdf":  "application/pdf",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".tif":  "image/tiff",
+    ".tiff": "image/tiff",
+    ".webp": "image/webp",
+}
+
 LOGGER           = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
@@ -155,9 +165,18 @@ def handler(event: dict, context) -> dict:
     s3_key      = f"uploads/{document_id}/{filename}"
     timestamp   = datetime.now(timezone.utc).isoformat()
 
-    # 1. Save to S3
+    ext         = os.path.splitext(filename.lower())[1]
+    content_type = CONTENT_TYPES.get(ext, "application/octet-stream")
+
+    # 1. Save to S3 with correct ContentType and inline disposition so browser displays it
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=file_bytes)
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=file_bytes,
+            ContentType=content_type,
+            ContentDisposition="inline",
+        )
         LOGGER.info("Saved to S3: %s", s3_key)
     except Exception:
         LOGGER.exception("S3 upload failed")
@@ -199,4 +218,26 @@ def handler(event: dict, context) -> dict:
         LOGGER.exception("DynamoDB write failed")
         return _response(500, {"detail": "Failed to persist OCR result"})
 
-    return _response(200, {**ocr_result, "document_id": document_id, "s3_key": s3_key})
+    # Generate a presigned URL so the frontend can display the file immediately
+    try:
+        presigned_url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key": s3_key,
+                "ResponseContentType": content_type,
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=3600,
+        )
+    except Exception:
+        LOGGER.warning("Could not generate presigned URL for %s", s3_key)
+        presigned_url = None
+
+    return _response(200, {
+        **ocr_result,
+        "document_id":      document_id,
+        "s3_key":           s3_key,
+        "uploaded_at":      timestamp,
+        "s3_presigned_url": presigned_url,
+    })

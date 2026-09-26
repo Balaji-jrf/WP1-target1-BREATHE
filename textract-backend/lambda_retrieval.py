@@ -12,7 +12,6 @@ import logging
 import os
 
 import boto3
-from boto3.dynamodb.conditions import Attr
 
 LOGGER       = logging.getLogger(__name__)
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
@@ -60,6 +59,18 @@ def _get_document(document_id: str) -> dict:
     item = table.get_item(Key={"document_id": document_id}).get("Item")
     if not item:
         return None
+    # Detect content type from filename
+    ext = os.path.splitext(item.get("filename", "").lower())[1]
+    content_types = {
+        ".pdf":  "application/pdf",
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".tif":  "image/tiff",
+        ".tiff": "image/tiff",
+        ".webp": "image/webp",
+    }
+    content_type = content_types.get(ext, "application/octet-stream")
     # Generate a presigned S3 URL valid for 1 hour so frontend can display the file
     try:
         s3 = boto3.client(
@@ -69,7 +80,12 @@ def _get_document(document_id: str) -> dict:
         )
         url = s3.generate_presigned_url(
             "get_object",
-            Params={"Bucket": item["s3_bucket"], "Key": item["s3_key"]},
+            Params={
+                "Bucket": item["s3_bucket"],
+                "Key": item["s3_key"],
+                "ResponseContentType": content_type,
+                "ResponseContentDisposition": "inline",
+            },
             ExpiresIn=3600,
         )
         item["s3_presigned_url"] = url
