@@ -53,9 +53,9 @@ table       = dynamo.Table(DYNAMO_TABLE)
 
 def _cors_headers() -> dict:
     return {
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
         "Access-Control-Allow-Methods": "POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "content-type",
     }
 
 
@@ -146,13 +146,18 @@ def _textract_pdf(s3_key: str) -> list[dict]:
 
 
 def handler(event: dict, context) -> dict:
-    if event.get("httpMethod") == "OPTIONS":
+    # API Gateway HTTP API v2 payload format
+    method = (event.get("requestContext") or {}).get("http", {}).get("method", "").upper()
+    if method == "OPTIONS":
         return _response(200, {})
 
     try:
         file_bytes, filename = _parse_multipart(event)
     except (KeyError, TypeError):
         return _response(400, {"detail": "Invalid multipart/form-data — 'file' field required"})
+
+    if not file_bytes:
+        return _response(400, {"detail": "Uploaded file is empty"})
 
     if not filename:
         return _response(400, {"detail": "A filename is required"})

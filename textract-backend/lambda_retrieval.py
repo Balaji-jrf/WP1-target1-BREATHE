@@ -22,9 +22,9 @@ table  = dynamo.Table(DYNAMO_TABLE)
 
 def _cors_headers() -> dict:
     return {
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
         "Access-Control-Allow-Methods": "GET,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "content-type",
     }
 
 
@@ -95,17 +95,19 @@ def _get_document(document_id: str) -> dict:
 
 
 def handler(event: dict, context) -> dict:
-    if event.get("httpMethod") == "OPTIONS":
+    # API Gateway HTTP API v2 payload format
+    rc          = event.get("requestContext") or {}
+    method      = rc.get("http", {}).get("method", "").upper()
+    raw_path    = event.get("rawPath", "")
+    path_params = event.get("pathParameters") or {}
+
+    if method == "OPTIONS":
         return _response(200, {})
 
-    path_params = event.get("pathParameters") or {}
-    route_key   = event.get("routeKey", "")
-    raw_path    = event.get("rawPath", "")
-
-    LOGGER.info("route=%s path=%s params=%s", route_key, raw_path, path_params)
+    LOGGER.info("method=%s path=%s params=%s", method, raw_path, path_params)
 
     # GET /documents — list all
-    if raw_path.rstrip("/").endswith("/documents") or route_key == "GET /documents":
+    if raw_path.rstrip("/").endswith("/documents"):
         try:
             return _response(200, _list_documents())
         except Exception:
