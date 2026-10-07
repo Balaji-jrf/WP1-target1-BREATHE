@@ -8,6 +8,7 @@ export default function ExtractTab() {
   const [file, setFile] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState('Extracting text…');
   const [error, setError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef(null);
@@ -25,9 +26,10 @@ export default function ExtractTab() {
     e.preventDefault();
     if (!file || loading) return;
     setLoading(true);
+    setLoadingMsg('Extracting text…');
     setError('');
     try {
-      const payload = await uploadDocument(file);
+      const payload = await uploadDocument(file, (msg) => setLoadingMsg(msg));
       setResult(payload);
     } catch (err) {
       setError(err.message || 'Could not connect to the OCR service.');
@@ -78,7 +80,7 @@ export default function ExtractTab() {
           <div className="action-row">
             <p className="limit-note"><span className="lock-icon">◈</span> Processed via Amazon Textract + NLP Pipeline · Stored securely in S3 + DynamoDB</p>
             <button className="process-button" type="submit" disabled={!file || loading}>
-              {loading ? <><span className="spinner" /> Extracting text…</> : <>Extract text <span>→</span></>}
+              {loading ? <><span className="spinner" /> {loadingMsg}</> : <>Extract text <span>→</span></>}
             </button>
           </div>
         </form>

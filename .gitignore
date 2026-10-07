@@ -18,3 +18,7 @@ aws-deployment/.pytest_cache/
 
 # OS
 .DS_Store
+
+# Ignore zip files
+textract-backend/*.zip
+

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchDocuments, fetchDocument } from '../api';
 import Modal from './Modal';
 
@@ -15,9 +15,7 @@ function DocModal({ item, docUrl, onClose }) {
         <span>{item.total_pages} page{item.total_pages === 1 ? '' : 's'}</span>
         <span>{item.elements?.length || 0} text blocks</span>
         <span>ID: {item.document_id}</span>
-        <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">
-          Open in new tab ↗
-        </a>
+        <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open in new tab ↗</a>
       </div>
       {isPdf
         ? <iframe src={docUrl} title="Document preview" className="modal-iframe" />
@@ -53,12 +51,105 @@ function OcrModal({ item, onClose }) {
   );
 }
 
-function HistoryCard({ item, onViewDoc, onViewOcr, isLoading, isSelected }) {
+const COMPARE_MIN = { w: 520, h: 340 };
+const COMPARE_DEFAULT = { w: Math.min(1100, window.innerWidth - 48), h: Math.min(680, window.innerHeight - 80) };
+
+function CompareView({ item, docUrl, onClose }) {
+  const isPdf = /\.pdf$/i.test(item?.filename || '');
+
+  // size & position state
+  const [size, setSize] = useState(COMPARE_DEFAULT);
+  const [pos, setPos] = useState({
+    x: Math.round((window.innerWidth - COMPARE_DEFAULT.w) / 2),
+    y: Math.round((window.innerHeight - COMPARE_DEFAULT.h) / 2),
+  });
+
+  // drag-to-move
+  const dragRef = useRef(null);
+  const onDragMouseDown = (e) => {
+    if (e.target.closest('button,a,iframe')) return;
+    e.preventDefault();
+    const startX = e.clientX - pos.x;
+    const startY = e.clientY - pos.y;
+    const onMove = (ev) => setPos({ x: ev.clientX - startX, y: ev.clientY - startY });
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // resize handle (bottom-right corner)
+  const onResizeMouseDown = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = size.w;
+    const startH = size.h;
+    const onMove = (ev) => setSize({
+      w: Math.max(COMPARE_MIN.w, startW + ev.clientX - startX),
+      h: Math.max(COMPARE_MIN.h, startH + ev.clientY - startY),
+    });
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   return (
-    <div className={`history-card ${isSelected ? 'is-selected' : ''}`}>
+    <div className="compare-backdrop" onClick={onClose}>
+      <div
+        className="compare-popup"
+        style={{ width: size.w, height: size.h, left: pos.x, top: pos.y }}
+        onClick={(e) => e.stopPropagation()}
+        ref={dragRef}
+      >
+        <div className="compare-bar" onMouseDown={onDragMouseDown}>
+          <span className="compare-title">⧉ Compare — {item.filename}</span>
+          <div className="compare-bar-right">
+            <span className="compare-meta">{item.elements?.length || 0} blocks · {item.total_pages}p</span>
+            {docUrl && <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open ↗</a>}
+            <button className="modal-close" onClick={onClose}>✕</button>
+          </div>
+        </div>
+        <div className="compare-body">
+          <div className="compare-pane">
+            <div className="compare-pane-label">Original Document</div>
+            {docUrl
+              ? isPdf
+                ? <iframe src={docUrl} title="Document" className="compare-iframe" />
+                : <img src={docUrl} alt={item.filename} className="compare-img" />
+              : <div className="compare-no-doc">No document URL available</div>
+            }
+          </div>
+          <div className="compare-pane">
+            <div className="compare-pane-label">OCR Text — {item.elements?.length || 0} blocks</div>
+            <div className="compare-ocr-scroll">
+              {item.elements?.length
+                ? item.elements.map((el, i) => (
+                  <article className="compare-ocr-item" key={`cmp-${el.page}-${i}`}>
+                    <div className="compare-ocr-meta">
+                      <span>P{String(el.page).padStart(2, '0')}</span>
+                      <span>{formatConfidence(el.confidence)}</span>
+                    </div>
+                    <p>{el.text}</p>
+                  </article>
+                ))
+                : <p className="empty-result" style={{ padding: '24px' }}>No text detected.</p>
+              }
+            </div>
+          </div>
+        </div>
+        <div className="compare-resize-handle" onMouseDown={onResizeMouseDown} title="Drag to resize" />
+      </div>
+    </div>
+  );
+}
+
+function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading }) {
+  return (
+    <div className={`history-card ${isLoading ? 'is-selected' : ''}`}>
       <div className="hcard-top">
-        <span className="hcard-name">{item.filename}</span>
-        <span className="hcard-pages">{item.total_pages}p</span>
+        <span className="hcard-name">Doc - {item.filename}</span>
+        <span className="hcard-pages">{item.total_pages}-pages</span>
       </div>
       <div className="hcard-meta">
         <span>{item.element_count} text blocks</span>
@@ -66,37 +157,30 @@ function HistoryCard({ item, onViewDoc, onViewOcr, isLoading, isSelected }) {
       </div>
       <p className="hcard-id">{item.document_id}</p>
       <div className="hcard-actions">
-        <button
-          className="hcard-btn"
-          onClick={() => onViewDoc(item.document_id)}
-          disabled={isLoading}
-        >
-          {isLoading ? <><span className="spinner" /> Loading…</> : '⊞ View Doc'}
+        <button className="hcard-btn" onClick={() => onViewDoc(item.document_id)} disabled={isLoading}>
+          {isLoading ? <><span className="spinner" /> …</> : '⊞ Doc'}
         </button>
-        <button
-          className="hcard-btn"
-          onClick={() => onViewOcr(item.document_id)}
-          disabled={isLoading}
-        >
-          {isLoading ? <><span className="spinner" /> Loading…</> : '≡ View OCR'}
+        <button className="hcard-btn" onClick={() => onViewOcr(item.document_id)} disabled={isLoading}>
+          {isLoading ? <><span className="spinner" /> …</> : '≡ OCR'}
+        </button>
+        <button className="hcard-btn hcard-btn-compare" onClick={() => onCompare(item.document_id)} disabled={isLoading}>
+          {isLoading ? <><span className="spinner" /> …</> : '⧉ Compare'}
         </button>
       </div>
     </div>
   );
 }
 
-export default function HistoryTab() {
+export default function HistoryTab({ onCountChange }) {
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
-
-  // Which card is currently being fetched
   const [fetchingId, setFetchingId] = useState(null);
   const [fetchError, setFetchError] = useState('');
 
-  // Modal state
   const [showDoc, setShowDoc] = useState(false);
   const [showOcr, setShowOcr] = useState(false);
+  const [showCompare, setShowCompare] = useState(false);
   const [activeItem, setActiveItem] = useState(null);
   const [activeDocUrl, setActiveDocUrl] = useState(null);
 
@@ -106,12 +190,13 @@ export default function HistoryTab() {
     try {
       const docs = await fetchDocuments();
       setHistory(docs);
+      onCountChange?.(docs.length);
     } catch (err) {
       setHistoryError(err.message);
     } finally {
       setHistoryLoading(false);
     }
-  }, []);
+  }, [onCountChange]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
@@ -125,6 +210,7 @@ export default function HistoryTab() {
       setActiveDocUrl(payload.s3_presigned_url || null);
       if (mode === 'doc') setShowDoc(true);
       if (mode === 'ocr') setShowOcr(true);
+      if (mode === 'compare') setShowCompare(true);
     } catch (err) {
       setFetchError(err.message);
     } finally {
@@ -132,10 +218,7 @@ export default function HistoryTab() {
     }
   };
 
-  const closeAll = () => {
-    setShowDoc(false);
-    setShowOcr(false);
-  };
+  const closeAll = () => { setShowDoc(false); setShowOcr(false); setShowCompare(false); };
 
   return (
     <section className="history-panel">
@@ -144,8 +227,7 @@ export default function HistoryTab() {
           <p className="section-kicker">Document archive</p>
           <h2 className="history-title">Processed Documents</h2>
           <p className="intro-copy">
-            All documents extracted and stored in the database.
-            Click View Doc to see the original file, or View OCR to read the extracted text.
+            Browse all extracted documents. View the original file, read the OCR text, or use Compare to see both side-by-side.
           </p>
         </div>
         <button className="clear-btn" onClick={loadHistory} disabled={historyLoading}>
@@ -172,9 +254,9 @@ export default function HistoryTab() {
                   key={item.document_id}
                   item={item}
                   isLoading={fetchingId === item.document_id}
-                  isSelected={fetchingId === item.document_id}
                   onViewDoc={(id) => loadAndOpen(id, 'doc')}
                   onViewOcr={(id) => loadAndOpen(id, 'ocr')}
+                  onCompare={(id) => loadAndOpen(id, 'compare')}
                 />
               ))}
             </div>
@@ -184,9 +266,11 @@ export default function HistoryTab() {
       {showDoc && activeItem && activeDocUrl && (
         <DocModal item={activeItem} docUrl={activeDocUrl} onClose={closeAll} />
       )}
-
       {showOcr && activeItem && (
         <OcrModal item={activeItem} onClose={closeAll} />
+      )}
+      {showCompare && activeItem && (
+        <CompareView item={activeItem} docUrl={activeDocUrl} onClose={closeAll} />
       )}
     </section>
   );

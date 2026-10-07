@@ -27,7 +27,7 @@
 .intro-stats strong { color: #d46a46; font-size: 15px; font-weight: 500; }
 
 /* ── Workspace ── */
-.workspace { max-width: 920px; }
+.workspace { max-width: 100%; }
 .dropzone { display: flex; min-height: 220px; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #aeb9af; background: rgba(255,255,255,.38); cursor: pointer; transition: .2s ease; }
 .dropzone:hover, .dropzone.is-dragging, .dropzone.has-file { border-color: #d46a46; background: #faf8f2; }
 .dropzone input { display: none; }
@@ -119,6 +119,8 @@
 .hcard-btn { flex: 1; border: 1px solid #cdd4cd; background: transparent; padding: 7px 10px; font: 500 9px 'DM Mono', monospace; letter-spacing: .07em; text-transform: uppercase; cursor: pointer; color: #183a30; transition: .15s; display: flex; align-items: center; justify-content: center; gap: 4px; }
 .hcard-btn:hover:not(:disabled) { background: #183a30; color: #f9f6ee; border-color: #183a30; }
 .hcard-btn:disabled { opacity: .5; cursor: not-allowed; }
+.hcard-btn-compare { border-color: #183a30 !important; color: #183a30 !important; }
+.hcard-btn-compare:hover:not(:disabled) { background: #d46a46 !important; border-color: #d46a46 !important; color: #fff !important; }
 
 /* ── Footer ── */
 footer { margin-top: 75px; color: #9ba49e; font: 9px 'DM Mono', monospace; letter-spacing: .12em; }
@@ -126,17 +128,72 @@ footer span { margin: 0 8px; color: #d46a46; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-@media (max-width: 700px) {
-  .app-shell { padding: 22px 20px 28px; }
+/* ── Compare Popup ── */
+.compare-backdrop { position: fixed; inset: 0; background: rgba(15,25,20,.45); backdrop-filter: blur(2px); z-index: 1000; }
+.compare-popup { position: fixed; display: flex; flex-direction: column; background: #fffaf3; box-shadow: 0 32px 80px rgba(0,0,0,.28), 0 0 0 1px #d9d7cd; overflow: hidden; min-width: 520px; min-height: 340px; }
+.compare-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-bottom: 1px solid #d9d7cd; background: #f0f4f0; flex-shrink: 0; cursor: grab; user-select: none; }
+.compare-bar:active { cursor: grabbing; }
+.compare-title { font: 500 13px 'Fraunces', serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.compare-bar-right { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+.compare-meta { font: 10px 'DM Mono', monospace; color: #87928b; text-transform: uppercase; }
+.compare-body { display: flex; flex: 1; overflow: hidden; }
+.compare-pane { display: flex; flex-direction: column; flex: 1; overflow: hidden; border-right: 1px solid #d9d7cd; }
+.compare-pane:last-child { border-right: 0; }
+.compare-pane-label { padding: 7px 14px; background: #f5f3ee; border-bottom: 1px solid #d9d7cd; font: 500 9px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .08em; color: #183a30; flex-shrink: 0; }
+.compare-iframe { flex: 1; width: 100%; border: 0; display: block; }
+.compare-img { max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; padding: 16px; display: block; }
+.compare-no-doc { display: flex; align-items: center; justify-content: center; flex: 1; color: #87928b; font: 12px 'DM Mono', monospace; }
+.compare-ocr-scroll { flex: 1; overflow-y: auto; padding: 0 14px 14px; }
+.compare-ocr-item { padding: 12px 0; border-bottom: 1px solid #e8e5de; }
+.compare-ocr-item:last-child { border-bottom: 0; }
+.compare-ocr-meta { display: flex; justify-content: space-between; margin-bottom: 5px; font: 500 9px 'DM Mono', monospace; text-transform: uppercase; color: #87928b; }
+.compare-ocr-meta span:last-child { color: #d46a46; }
+.compare-ocr-item p { margin: 0; font: 14px/1.55 'Fraunces', serif; color: #17211d; }
+.compare-resize-handle { position: absolute; bottom: 0; right: 0; width: 18px; height: 18px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #cdd4cd 50%, #cdd4cd 60%, transparent 60%, transparent 70%, #cdd4cd 70%, #cdd4cd 80%, transparent 80%); }
+
+/* ── Responsive ── */
+@media (max-width: 1024px) {
+  .app-shell { padding: 24px 32px 30px; }
+  .result-item { grid-template-columns: 100px minmax(0,1fr) 130px; }
+}
+
+@media (max-width: 768px) {
+  .app-shell { padding: 18px 20px 24px; }
   .service-status { display: none; }
-  .tab-nav { margin-left: 0; }
-  .intro { display: block; padding: 45px 0 36px; }
-  .intro h2 { font-size: 40px; }
-  .intro-stats { margin-top: 30px; }
-  .action-row, .results-heading, .history-header { align-items: flex-start; flex-direction: column; }
-  .process-button { width: 100%; }
+  .topbar { flex-wrap: wrap; gap: 10px; }
+  .tab-nav { margin-left: 0; order: 3; width: 100%; }
+  .tab { flex: 1; text-align: center; }
+  .intro { display: block; padding: 36px 0 28px; }
+  .intro h2 { font-size: clamp(28px, 7vw, 44px); }
+  .intro-stats { margin-top: 24px; }
+  .workspace { max-width: 100%; }
+  .action-row { flex-direction: column; align-items: stretch; gap: 12px; }
+  .process-button { width: 100%; text-align: center; }
+  .results-heading { flex-direction: column; align-items: flex-start; gap: 10px; }
   .result-item { display: block; }
-  .item-meta { display: flex; justify-content: space-between; margin-bottom: 10px; }
-  .result-item small { display: block; margin-top: 12px; text-align: left; }
+  .item-meta { display: flex; justify-content: space-between; margin-bottom: 8px; }
+  .result-item small { display: block; margin-top: 10px; text-align: left; }
+  .history-header { flex-direction: column; align-items: flex-start; gap: 10px; }
   .history-grid { grid-template-columns: 1fr; }
+  .hcard-actions { flex-wrap: wrap; }
+  .hcard-btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
+  .modal-box { max-height: 96vh; }
+  .modal-iframe { height: 55vh; }
+  .doc-iframe { height: 380px; }
+  .compare-body { flex-direction: column; }
+  .compare-pane { border-right: 0; border-bottom: 1px solid #d9d7cd; min-height: 45vh; }
+  .compare-pane:last-child { border-bottom: 0; }
+  .compare-iframe { min-height: 40vh; }
+}
+
+@media (max-width: 480px) {
+  .app-shell { padding: 14px 14px 20px; }
+  .topbar h1 { font-size: 17px; }
+  .intro h2 { font-size: 26px; }
+  .history-title { font-size: 28px; }
+  .result-count strong { font-size: 22px; }
+  .hcard-btn { font-size: 8px; padding: 6px 6px; }
+  .modal-title { font-size: 12px; }
+  .compare-title { font-size: 12px; }
+  .compare-meta { display: none; }
 }
