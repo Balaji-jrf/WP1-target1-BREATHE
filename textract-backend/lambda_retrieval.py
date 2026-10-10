@@ -1,9 +1,8 @@
 """
 Retrieval Lambda
 ----------------
-GET /documents              → list all documents (scan DynamoDB, metadata only)
-GET /document/{document_id} → fetch single document; if still processing, checks
-                              Textract job and finalises the record on the fly
+GET /documents              → list all documents (metadata only)
+GET /document/{document_id} → single document; finalises Textract job if still processing
 """
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ from decimal import Decimal
 import boto3
 
 LOGGER       = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
+
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
 
 CONTENT_TYPES = {
@@ -37,7 +38,7 @@ s3       = boto3.client("s3", region_name="ap-south-2",
 
 def _cors_headers() -> dict:
     return {
-        "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
+        "Access-Control-Allow-Origin":  os.environ.get("ALLOWED_ORIGIN", "*"),
         "Access-Control-Allow-Methods": "GET,OPTIONS",
         "Access-Control-Allow-Headers": "content-type",
     }
@@ -87,12 +88,12 @@ def _blocks_to_elements(blocks: list) -> list[dict]:
 
 
 def _check_and_finish_job(item: dict) -> dict:
-    """Poll Textract once; if done, write completed record to DynamoDB and return updated item."""
+    """Check Textract job once. If done, write completed record and return updated item."""
     job_id = item.get("textract_job_id")
     if not job_id:
         return item
 
-    result = textract.get_document_text_detection(JobId=job_id)
+    result     = textract.get_document_text_detection(JobId=job_id)
     job_status = result["JobStatus"]
 
     if job_status == "SUCCEEDED":
@@ -100,7 +101,7 @@ def _check_and_finish_job(item: dict) -> dict:
         while "NextToken" in result:
             result = textract.get_document_text_detection(JobId=job_id, NextToken=result["NextToken"])
             blocks.extend(result["Blocks"])
-        elements  = _blocks_to_elements(blocks)
+        elements   = _blocks_to_elements(blocks)
         ocr_result = {
             "filename":    item["filename"],
             "total_pages": max((e["page"] for e in elements), default=1),
@@ -125,7 +126,7 @@ def _check_and_finish_job(item: dict) -> dict:
         )
         return {**item, "status": "failed"}
 
-    return item  # still IN_PROGRESS
+    return item  # IN_PROGRESS — frontend keeps polling
 
 
 def _get_document(document_id: str) -> dict | None:
@@ -133,28 +134,25 @@ def _get_document(document_id: str) -> dict | None:
     if not item:
         return None
 
-    # If still processing, check Textract and finalise if done
     if item.get("status") == "processing":
         try:
             item = _check_and_finish_job(item)
         except Exception:
             LOGGER.warning("Could not check Textract job for %s", document_id)
 
-    # Generate presigned URL for display
     ext          = os.path.splitext(item.get("filename", "").lower())[1]
     content_type = CONTENT_TYPES.get(ext, "application/octet-stream")
     try:
-        url = s3.generate_presigned_url(
+        item["s3_presigned_url"] = s3.generate_presigned_url(
             "get_object",
             Params={
-                "Bucket": item["s3_bucket"],
-                "Key":    item["s3_key"],
+                "Bucket":                     item["s3_bucket"],
+                "Key":                        item["s3_key"],
                 "ResponseContentType":        content_type,
                 "ResponseContentDisposition": "inline",
             },
             ExpiresIn=3600,
         )
-        item["s3_presigned_url"] = url
     except Exception:
         LOGGER.warning("Could not generate presigned URL for %s", document_id)
 
@@ -170,7 +168,7 @@ def handler(event: dict, context) -> dict:
     if method == "OPTIONS":
         return _response(200, {})
 
-    LOGGER.info("method=%s path=%s params=%s", method, raw_path, path_params)
+    LOGGER.info("method=%s path=%s", method, raw_path)
 
     if raw_path.rstrip("/").endswith("/documents"):
         try:
