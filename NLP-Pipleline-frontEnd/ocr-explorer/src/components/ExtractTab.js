@@ -74,7 +74,7 @@ export default function ExtractTab() {
             <div className="upload-icon">↑</div>
             {file
               ? <><p className="drop-title">{file.name}</p><p className="drop-note">{(file.size / 1024 / 1024).toFixed(2)} MB · Ready to process</p></>
-              : <><p className="drop-title">Drop a document here</p><p className="drop-note">or click to browse · PDF, PNG, JPEG, TIFF, WebP · max 10 MB</p></>
+              : <><p className="drop-title">Drop a document here</p><p className="drop-note">or click to browse · PDF, PNG, JPEG, TIFF, WebP</p></>
             }
           </div>
           <div className="action-row">
