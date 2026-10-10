@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { fetchDocuments, fetchDocument } from '../api';
+import { fetchDocuments, fetchDocument, downloadOcrJson } from '../api';
 import Modal from './Modal';
 
 const formatDate = (iso) =>
@@ -170,9 +170,10 @@ function CompareView({ item, docUrl, onClose }) {
   );
 }
 
-function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading }) {
+function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownload, isDownloading }) {
   const size = formatSize(item.file_size_bytes);
   const time = formatTime(item.processing_time_seconds);
+  const busy = isLoading || isDownloading;
   return (
     <div className={`history-card ${isLoading ? 'is-selected' : ''}`}>
       <div className="hcard-top">
@@ -187,14 +188,17 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading }) {
       </div>
       <p className="hcard-id">{item.document_id}</p>
       <div className="hcard-actions">
-        <button className="hcard-btn" onClick={() => onViewDoc(item.document_id)} disabled={isLoading}>
+        <button className="hcard-btn" onClick={() => onViewDoc(item.document_id)} disabled={busy}>
           {isLoading ? <><span className="spinner" /> …</> : '⊞ Doc'}
         </button>
-        <button className="hcard-btn" onClick={() => onViewOcr(item.document_id)} disabled={isLoading}>
+        <button className="hcard-btn" onClick={() => onViewOcr(item.document_id)} disabled={busy}>
           {isLoading ? <><span className="spinner" /> …</> : '≡ OCR'}
         </button>
-        <button className="hcard-btn hcard-btn-compare" onClick={() => onCompare(item.document_id)} disabled={isLoading}>
+        <button className="hcard-btn hcard-btn-compare" onClick={() => onCompare(item.document_id)} disabled={busy}>
           {isLoading ? <><span className="spinner" /> …</> : '⧉ Compare'}
+        </button>
+        <button className="hcard-btn hcard-btn-download" onClick={() => onDownload(item.document_id)} disabled={busy}>
+          {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
         </button>
       </div>
     </div>
@@ -206,6 +210,7 @@ export default function HistoryTab({ onCountChange }) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const [fetchingId, setFetchingId] = useState(null);
+  const [downloadingId, setDownloadingId] = useState(null);
   const [fetchError, setFetchError] = useState('');
 
   const [showDoc, setShowDoc] = useState(false);
@@ -247,6 +252,18 @@ export default function HistoryTab({ onCountChange }) {
     }
   };
 
+  const handleDownload = async (document_id) => {
+    setDownloadingId(document_id);
+    setFetchError('');
+    try {
+      await downloadOcrJson(document_id);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
   const closeAll = () => { setShowDoc(false); setShowOcr(false); setShowCompare(false); };
 
   return (
@@ -283,9 +300,11 @@ export default function HistoryTab({ onCountChange }) {
                   key={item.document_id}
                   item={item}
                   isLoading={fetchingId === item.document_id}
+                  isDownloading={downloadingId === item.document_id}
                   onViewDoc={(id) => loadAndOpen(id, 'doc')}
                   onViewOcr={(id) => loadAndOpen(id, 'ocr')}
                   onCompare={(id) => loadAndOpen(id, 'compare')}
+                  onDownload={handleDownload}
                 />
               ))}
             </div>

@@ -121,6 +121,8 @@
 .hcard-btn:disabled { opacity: .5; cursor: not-allowed; }
 .hcard-btn-compare { border-color: #183a30 !important; color: #183a30 !important; }
 .hcard-btn-compare:hover:not(:disabled) { background: #d46a46 !important; border-color: #d46a46 !important; color: #fff !important; }
+.hcard-btn-download { border-color: #4a7a5a !important; color: #4a7a5a !important; }
+.hcard-btn-download:hover:not(:disabled) { background: #4a7a5a !important; border-color: #4a7a5a !important; color: #fff !important; }
 
 /* ── Footer ── */
 footer { margin-top: 75px; color: #9ba49e; font: 9px 'DM Mono', monospace; letter-spacing: .12em; }

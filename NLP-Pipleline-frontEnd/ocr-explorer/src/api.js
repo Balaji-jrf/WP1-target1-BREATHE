@@ -95,3 +95,24 @@ export async function fetchDocument(document_id) {
   if (!res.ok) throw new Error(data.detail || 'Failed to fetch document.');
   return data;
 }
+
+export async function downloadOcrJson(document_id) {
+  const data = await fetchDocument(document_id);
+  const payload = {
+    document_id:              data.document_id,
+    filename:                 data.filename,
+    total_pages:              data.total_pages,
+    element_count:            data.element_count,
+    uploaded_at:              data.uploaded_at,
+    file_size_bytes:          data.file_size_bytes,
+    processing_time_seconds:  data.processing_time_seconds,
+    elements:                 data.elements || [],
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `${data.filename.replace(/\.[^.]+$/, '')}_ocr.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
