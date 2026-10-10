@@ -235,8 +235,7 @@ export default function HistoryTab({ onCountChange }) {
     setFetchError('');
     try {
       const payload = await fetchDocument(document_id);
-      const ocrData = payload.ocr_result || payload;
-      setActiveItem({ ...ocrData, document_id: ocrData.document_id || document_id });
+      setActiveItem({ ...payload, document_id: payload.document_id || document_id });
       setActiveDocUrl(payload.s3_presigned_url || null);
       if (mode === 'doc') setShowDoc(true);
       if (mode === 'ocr') setShowOcr(true);

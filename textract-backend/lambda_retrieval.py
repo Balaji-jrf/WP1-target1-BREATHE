@@ -1,8 +1,8 @@
 """
 Retrieval Lambda
 ----------------
-GET /documents              → list all documents (metadata only)
-GET /document/{document_id} → single document; finalises Textract job if still processing
+GET /documents              → list all documents (metadata only, no OCR blob)
+GET /document/{document_id} → metadata + OCR JSON fetched directly from S3
 """
 
 from __future__ import annotations
@@ -54,7 +54,8 @@ def _response(status: int, body) -> dict:
 
 def _list_documents() -> dict:
     items, kwargs = [], {
-        "ProjectionExpression": "document_id, filename, total_pages, element_count, uploaded_at, #st, file_size_bytes, processing_time_seconds",
+        "ProjectionExpression": "document_id, filename, total_pages, element_count, "
+                                "uploaded_at, #st, file_size_bytes, processing_time_seconds",
         "ExpressionAttributeNames": {"#st": "status"},
     }
     while True:
@@ -76,25 +77,22 @@ def _blocks_to_elements(blocks: list) -> list[dict]:
         elements.append({
             "page":       block.get("Page", 1),
             "text":       block["Text"],
-            "confidence": Decimal(str(round(block["Confidence"] / 100, 4))),
+            "confidence": round(block["Confidence"] / 100, 4),
             "bbox": [
-                Decimal(str(round(bb["Left"], 4))),
-                Decimal(str(round(bb["Top"], 4))),
-                Decimal(str(round(bb["Left"] + bb["Width"], 4))),
-                Decimal(str(round(bb["Top"] + bb["Height"], 4))),
+                round(bb["Left"], 4),
+                round(bb["Top"], 4),
+                round(bb["Left"] + bb["Width"], 4),
+                round(bb["Top"] + bb["Height"], 4),
             ],
         })
     return elements
 
 
-def _check_and_finish_job(item: dict) -> dict:
-    """Check Textract job once. If done, write completed record and return updated item."""
+def _finish_pdf_job(item: dict) -> dict:
+    """Poll Textract once. If SUCCEEDED, write OCR JSON to S3, update DynamoDB."""
     job_id = item.get("textract_job_id")
     if not job_id:
         return item
-
-    import time as _time
-    started_at = _time.time()
 
     result     = textract.get_document_text_detection(JobId=job_id)
     job_status = result["JobStatus"]
@@ -104,33 +102,53 @@ def _check_and_finish_job(item: dict) -> dict:
         while "NextToken" in result:
             result = textract.get_document_text_detection(JobId=job_id, NextToken=result["NextToken"])
             blocks.extend(result["Blocks"])
-        elements   = _blocks_to_elements(blocks)
+
+        elements    = _blocks_to_elements(blocks)
+        document_id = item["document_id"]
+        filename    = item["filename"]
         total_pages = max((e["page"] for e in elements), default=1)
-        ocr_result = {
-            "filename":    item["filename"],
-            "total_pages": total_pages,
-            "elements":    elements,
-        }
-        # Estimate processing time: from uploaded_at to now (best proxy for async jobs)
+
+        # Write OCR JSON to S3
+        ocr_s3_key = f"processed/{document_id}/ocr.json"
+        s3.put_object(
+            Bucket=item["s3_bucket"],
+            Key=ocr_s3_key,
+            Body=json.dumps({
+                "document_id": document_id,
+                "filename":    filename,
+                "total_pages": total_pages,
+                "elements":    elements,
+            }),
+            ContentType="application/json",
+        )
+
+        # Compute processing time from uploaded_at
         processing_time = None
         try:
             from datetime import datetime, timezone
-            uploaded_at = datetime.fromisoformat(item["uploaded_at"].replace("Z", "+00:00"))
-            processing_time = round((datetime.now(timezone.utc) - uploaded_at).total_seconds(), 1)
+            uploaded_at     = datetime.fromisoformat(item["uploaded_at"].replace("Z", "+00:00"))
+            processing_time = Decimal(str(round(
+                (datetime.now(timezone.utc) - uploaded_at).total_seconds(), 1
+            )))
         except Exception:
             pass
+
         new_item = {
-            **{k: v for k, v in item.items() if k != "textract_job_id"},
+            k: v for k, v in item.items()
+            if k not in ("textract_job_id", "ocr_result")  # strip old fields
+        }
+        new_item.update({
             "total_pages":   total_pages,
             "element_count": len(elements),
             "status":        "completed",
-            "ocr_result":    ocr_result,
-        }
+            "ocr_s3_key":    ocr_s3_key,
+        })
         if processing_time is not None:
-            from decimal import Decimal
-            new_item["processing_time_seconds"] = Decimal(str(processing_time))
+            new_item["processing_time_seconds"] = processing_time
+
         table.put_item(Item=new_item)
-        return {**new_item}
+        LOGGER.info("PDF job finished: %s — %d elements, %d pages", document_id, len(elements), total_pages)
+        return new_item
 
     if job_status == "FAILED":
         table.update_item(
@@ -151,10 +169,11 @@ def _get_document(document_id: str) -> dict | None:
 
     if item.get("status") == "processing":
         try:
-            item = _check_and_finish_job(item)
+            item = _finish_pdf_job(item)
         except Exception:
             LOGGER.warning("Could not check Textract job for %s", document_id)
 
+    # Generate presigned URL for the original document
     ext          = os.path.splitext(item.get("filename", "").lower())[1]
     content_type = CONTENT_TYPES.get(ext, "application/octet-stream")
     try:
@@ -170,6 +189,17 @@ def _get_document(document_id: str) -> dict | None:
         )
     except Exception:
         LOGGER.warning("Could not generate presigned URL for %s", document_id)
+
+    # Fetch OCR JSON directly from S3 and inline it
+    ocr_s3_key = item.get("ocr_s3_key")
+    if ocr_s3_key and item.get("status") == "completed":
+        try:
+            obj = s3.get_object(Bucket=item["s3_bucket"], Key=ocr_s3_key)
+            ocr = json.loads(obj["Body"].read())
+            item["elements"]    = ocr.get("elements", [])
+            item["total_pages"] = ocr.get("total_pages", item.get("total_pages", 0))
+        except Exception:
+            LOGGER.warning("Could not fetch OCR JSON from S3 for %s", document_id)
 
     return item
 
@@ -199,7 +229,7 @@ def handler(event: dict, context) -> dict:
     try:
         item = _get_document(document_id)
     except Exception:
-        LOGGER.exception("DynamoDB get_item failed for %s", document_id)
+        LOGGER.exception("Failed to retrieve document %s", document_id)
         return _response(500, {"detail": "Failed to retrieve document"})
 
     if not item:
