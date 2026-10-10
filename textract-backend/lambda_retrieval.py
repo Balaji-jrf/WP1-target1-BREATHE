@@ -91,15 +91,17 @@ def _get_document(document_id: str) -> dict | None:
     except Exception:
         LOGGER.warning("Could not generate presigned URL for %s", document_id)
 
-    # If completed, fetch OCR JSON from S3 and inline elements
+    # If completed, return a presigned URL for the ocr.json — never inline elements
+    # (avoids API Gateway 6MB response limit for large documents)
     if item.get("status") == "completed" and item.get("ocr_s3_key"):
         try:
-            obj = s3.get_object(Bucket=item["s3_bucket"], Key=item["ocr_s3_key"])
-            ocr = json.loads(obj["Body"].read())
-            item["elements"]    = ocr.get("elements", [])
-            item["total_pages"] = ocr.get("total_pages", item.get("total_pages", 0))
+            item["ocr_presigned_url"] = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": item["s3_bucket"], "Key": item["ocr_s3_key"]},
+                ExpiresIn=3600,
+            )
         except Exception:
-            LOGGER.warning("Could not fetch OCR JSON from S3 for %s", document_id)
+            LOGGER.warning("Could not generate OCR presigned URL for %s", document_id)
 
     return item
 

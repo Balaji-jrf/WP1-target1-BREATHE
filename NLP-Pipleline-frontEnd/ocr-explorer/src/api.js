@@ -6,6 +6,13 @@ const log = (step, msg, data) => {
   else console.log(`[OCR ${ts}] [${step}]`, msg);
 };
 
+// Fetch OCR elements directly from S3 presigned URL — bypasses API Gateway 6MB limit
+async function fetchOcrFromS3(ocr_presigned_url) {
+  const res = await fetch(ocr_presigned_url);
+  if (!res.ok) throw new Error(`Failed to fetch OCR JSON from S3 (${res.status})`);
+  return await res.json();
+}
+
 export async function uploadDocument(file, onStatus) {
   log('INIT', `file=${file.name} size=${(file.size/1024/1024).toFixed(2)}MB type=${file.type}`);
 
@@ -45,28 +52,48 @@ async function pollUntilDone(document_id, onStatus, intervalMs = 5000, maxAttemp
     const elapsed = Math.round(((i + 1) * intervalMs) / 1000);
 
     log('POLL', `attempt ${i + 1}/${maxAttempts} elapsed=${elapsed}s — GET /document/${document_id}`);
-    const res  = await fetch(`${API_URL}/document/${document_id}`);
-    const data = await res.json();
+
+    let res, data;
+    try {
+      res  = await fetch(`${API_URL}/document/${document_id}`);
+      data = await res.json();
+    } catch (err) {
+      log('POLL', `attempt ${i + 1} network error — ${err.message} — retrying`);
+      onStatus?.(`Processing large document… ${elapsed}s elapsed`);
+      continue;
+    }
+
     log('POLL', `attempt ${i + 1} response — status=${data.status} http=${res.status}`, {
       textract_job_id: data.textract_job_id,
       total_pages:     data.total_pages,
       element_count:   data.element_count,
     });
 
+    // Transient gateway errors — Lambda still running in background
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      log('POLL', `attempt ${i + 1} transient ${res.status} — Lambda still processing, retrying`);
+      onStatus?.(`Processing large document… ${elapsed}s elapsed`);
+      continue;
+    }
+
     if (!res.ok) throw new Error(data.detail || 'Polling failed.');
 
     if (data.status === 'completed') {
       log('POLL', `COMPLETED after ${elapsed}s — pages=${data.total_pages} elements=${data.element_count}`);
+      // Fetch OCR JSON directly from S3 — never through API Gateway (no 6MB limit)
+      log('POLL', `fetching OCR JSON from S3…`);
+      const ocr = await fetchOcrFromS3(data.ocr_presigned_url);
+      log('POLL', `OCR JSON loaded — elements=${ocr.elements?.length}`);
       return {
         document_id,
-        filename:        data.filename,
-        total_pages:     data.total_pages,
-        element_count:   data.element_count,
-        elements:        data.elements || [],
-        uploaded_at:     data.uploaded_at,
-        file_size_bytes: data.file_size_bytes,
+        filename:                data.filename,
+        total_pages:             ocr.total_pages,
+        element_count:           data.element_count,
+        elements:                ocr.elements || [],
+        uploaded_at:             data.uploaded_at,
+        file_size_bytes:         data.file_size_bytes,
         processing_time_seconds: data.processing_time_seconds,
-        s3_presigned_url: data.s3_presigned_url,
+        s3_presigned_url:        data.s3_presigned_url,
       };
     }
 
@@ -75,7 +102,6 @@ async function pollUntilDone(document_id, onStatus, intervalMs = 5000, maxAttemp
       throw new Error('OCR processing failed on the server.');
     }
 
-    // still processing
     onStatus?.(`Processing… ${elapsed}s elapsed`);
   }
 
@@ -93,20 +119,38 @@ export async function fetchDocument(document_id) {
   const res  = await fetch(`${API_URL}/document/${document_id}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to fetch document.');
+
+  // Fetch OCR JSON directly from S3 if available
+  if (data.ocr_presigned_url) {
+    try {
+      const ocr      = await fetchOcrFromS3(data.ocr_presigned_url);
+      data.elements  = ocr.elements || [];
+      data.total_pages = ocr.total_pages ?? data.total_pages;
+    } catch (err) {
+      console.warn('[fetchDocument] Could not load OCR JSON from S3:', err.message);
+    }
+  }
+
   return data;
 }
 
 export async function downloadOcrJson(document_id) {
-  const data = await fetchDocument(document_id);
+  const res  = await fetch(`${API_URL}/document/${document_id}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Failed to fetch document.');
+
+  // Fetch OCR JSON directly from S3
+  const ocr = await fetchOcrFromS3(data.ocr_presigned_url);
+
   const payload = {
-    document_id:              data.document_id,
-    filename:                 data.filename,
-    total_pages:              data.total_pages,
-    element_count:            data.element_count,
-    uploaded_at:              data.uploaded_at,
-    file_size_bytes:          data.file_size_bytes,
-    processing_time_seconds:  data.processing_time_seconds,
-    elements:                 data.elements || [],
+    document_id:             data.document_id,
+    filename:                data.filename,
+    total_pages:             ocr.total_pages,
+    element_count:           data.element_count,
+    uploaded_at:             data.uploaded_at,
+    file_size_bytes:         data.file_size_bytes,
+    processing_time_seconds: data.processing_time_seconds,
+    elements:                ocr.elements || [],
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
