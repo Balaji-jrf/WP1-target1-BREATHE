@@ -7,13 +7,31 @@ const formatDate = (iso) =>
 
 const formatConfidence = (c) => `${Math.round((parseFloat(c) || 0) * 100)}%`;
 
+const formatSize = (bytes) => {
+  if (!bytes) return null;
+  const b = Number(bytes);
+  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(2)} MB`;
+  if (b >= 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${b} B`;
+};
+
+const formatTime = (secs) => {
+  if (!secs) return null;
+  const s = Number(secs);
+  return s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${s}s`;
+};
+
 function DocModal({ item, docUrl, onClose }) {
   const isPdf = /\.pdf$/i.test(item?.filename || '');
+  const size = formatSize(item.file_size_bytes);
+  const time = formatTime(item.processing_time_seconds);
   return (
     <Modal title={item.filename} onClose={onClose}>
       <div className="modal-doc-meta">
         <span>{item.total_pages} page{item.total_pages === 1 ? '' : 's'}</span>
         <span>{item.elements?.length || 0} text blocks</span>
+        {size && <span>📄 {size}</span>}
+        {time && <span>⏱ {time} to process</span>}
         <span>ID: {item.document_id}</span>
         <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open in new tab ↗</a>
       </div>
@@ -26,11 +44,15 @@ function DocModal({ item, docUrl, onClose }) {
 }
 
 function OcrModal({ item, onClose }) {
+  const size = formatSize(item.file_size_bytes);
+  const time = formatTime(item.processing_time_seconds);
   return (
     <Modal title={`OCR — ${item.filename}`} onClose={onClose}>
       <div className="modal-ocr-meta">
         <span>{item.total_pages} page{item.total_pages === 1 ? '' : 's'}</span>
         <span>{item.elements?.length || 0} text blocks</span>
+        {size && <span>📄 {size}</span>}
+        {time && <span>⏱ {time} to process</span>}
         {item.uploaded_at && <span>{new Date(item.uploaded_at).toLocaleString('en-IN')}</span>}
       </div>
       <div className="modal-ocr-list">
@@ -105,7 +127,11 @@ function CompareView({ item, docUrl, onClose }) {
         <div className="compare-bar" onMouseDown={onDragMouseDown}>
           <span className="compare-title">⧉ Compare — {item.filename}</span>
           <div className="compare-bar-right">
-            <span className="compare-meta">{item.elements?.length || 0} blocks · {item.total_pages}p</span>
+            <span className="compare-meta">
+              {item.elements?.length || 0} blocks · {item.total_pages}p
+              {formatSize(item.file_size_bytes) && ` · ${formatSize(item.file_size_bytes)}`}
+              {formatTime(item.processing_time_seconds) && ` · ⏱${formatTime(item.processing_time_seconds)}`}
+            </span>
             {docUrl && <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open ↗</a>}
             <button className="modal-close" onClick={onClose}>✕</button>
           </div>
@@ -145,6 +171,8 @@ function CompareView({ item, docUrl, onClose }) {
 }
 
 function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading }) {
+  const size = formatSize(item.file_size_bytes);
+  const time = formatTime(item.processing_time_seconds);
   return (
     <div className={`history-card ${isLoading ? 'is-selected' : ''}`}>
       <div className="hcard-top">
@@ -153,6 +181,8 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading }) {
       </div>
       <div className="hcard-meta">
         <span>{item.element_count} text blocks</span>
+        {size && <span>📄 {size}</span>}
+        {time && <span>⏱ {time}</span>}
         <span>{formatDate(item.uploaded_at)}</span>
       </div>
       <p className="hcard-id">{item.document_id}</p>

@@ -54,7 +54,7 @@ def _response(status: int, body) -> dict:
 
 def _list_documents() -> dict:
     items, kwargs = [], {
-        "ProjectionExpression": "document_id, filename, total_pages, element_count, uploaded_at, #st",
+        "ProjectionExpression": "document_id, filename, total_pages, element_count, uploaded_at, #st, file_size_bytes, processing_time_seconds",
         "ExpressionAttributeNames": {"#st": "status"},
     }
     while True:
@@ -93,6 +93,9 @@ def _check_and_finish_job(item: dict) -> dict:
     if not job_id:
         return item
 
+    import time as _time
+    started_at = _time.time()
+
     result     = textract.get_document_text_detection(JobId=job_id)
     job_status = result["JobStatus"]
 
@@ -102,20 +105,32 @@ def _check_and_finish_job(item: dict) -> dict:
             result = textract.get_document_text_detection(JobId=job_id, NextToken=result["NextToken"])
             blocks.extend(result["Blocks"])
         elements   = _blocks_to_elements(blocks)
+        total_pages = max((e["page"] for e in elements), default=1)
         ocr_result = {
             "filename":    item["filename"],
-            "total_pages": max((e["page"] for e in elements), default=1),
+            "total_pages": total_pages,
             "elements":    elements,
         }
-        table.put_item(Item={
+        # Estimate processing time: from uploaded_at to now (best proxy for async jobs)
+        processing_time = None
+        try:
+            from datetime import datetime, timezone
+            uploaded_at = datetime.fromisoformat(item["uploaded_at"].replace("Z", "+00:00"))
+            processing_time = round((datetime.now(timezone.utc) - uploaded_at).total_seconds(), 1)
+        except Exception:
+            pass
+        new_item = {
             **{k: v for k, v in item.items() if k != "textract_job_id"},
-            "total_pages":   ocr_result["total_pages"],
+            "total_pages":   total_pages,
             "element_count": len(elements),
             "status":        "completed",
             "ocr_result":    ocr_result,
-        })
-        return {**item, "status": "completed", "ocr_result": ocr_result,
-                "total_pages": ocr_result["total_pages"], "element_count": len(elements)}
+        }
+        if processing_time is not None:
+            from decimal import Decimal
+            new_item["processing_time_seconds"] = Decimal(str(processing_time))
+        table.put_item(Item=new_item)
+        return {**new_item}
 
     if job_status == "FAILED":
         table.update_item(

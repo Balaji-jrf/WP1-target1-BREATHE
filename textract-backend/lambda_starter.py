@@ -67,41 +67,50 @@ def _blocks_to_elements(blocks: list) -> list[dict]:
     return elements
 
 
-def _write_processing(document_id, filename, s3_key, timestamp, job_id=None):
+def _write_processing(document_id, filename, s3_key, timestamp, file_size_bytes=0, job_id=None):
     item = {
-        "document_id":  document_id,
-        "filename":     filename,
-        "s3_bucket":    S3_BUCKET,
-        "s3_key":       s3_key,
-        "uploaded_at":  timestamp,
-        "total_pages":  0,
-        "element_count": 0,
-        "status":       "processing",
+        "document_id":    document_id,
+        "filename":       filename,
+        "s3_bucket":      S3_BUCKET,
+        "s3_key":         s3_key,
+        "uploaded_at":    timestamp,
+        "file_size_bytes": Decimal(str(file_size_bytes)),
+        "total_pages":    0,
+        "element_count":  0,
+        "status":         "processing",
     }
     if job_id:
         item["textract_job_id"] = job_id
     table.put_item(Item=item)
 
 
-def _write_completed(document_id, filename, s3_key, timestamp, elements):
+def _write_completed(document_id, filename, s3_key, timestamp, elements, file_size_bytes=0, started_at=None):
     ocr_result = {
         "filename":    filename,
         "total_pages": max((e["page"] for e in elements), default=1),
         "elements":    elements,
     }
-    table.put_item(Item={
+    processing_time = None
+    if started_at is not None:
+        import time
+        processing_time = Decimal(str(round(time.time() - started_at, 1)))
+    item = {
         "document_id":   document_id,
         "filename":      filename,
         "s3_bucket":     S3_BUCKET,
         "s3_key":        s3_key,
         "uploaded_at":   timestamp,
+        "file_size_bytes": Decimal(str(file_size_bytes)),
         "total_pages":   ocr_result["total_pages"],
         "element_count": len(elements),
         "status":        "completed",
         "ocr_result":    ocr_result,
-    })
-    LOGGER.info("Completed: %s — %d elements, %d pages",
-                document_id, len(elements), ocr_result["total_pages"])
+    }
+    if processing_time is not None:
+        item["processing_time_seconds"] = processing_time
+    table.put_item(Item=item)
+    LOGGER.info("Completed: %s — %d elements, %d pages, %.1fs",
+                document_id, len(elements), ocr_result["total_pages"], float(processing_time or 0))
 
 
 def handler(event, context):
@@ -113,23 +122,26 @@ def handler(event, context):
             LOGGER.warning("Unexpected S3 key format: %s", s3_key)
             continue
 
-        document_id = parts[1]
-        filename    = parts[2]
-        timestamp   = datetime.now(timezone.utc).isoformat()
-        ext         = os.path.splitext(filename.lower())[1]
-        is_pdf      = ext == ".pdf"
+        document_id     = parts[1]
+        filename        = parts[2]
+        timestamp       = datetime.now(timezone.utc).isoformat()
+        file_size_bytes = record["s3"]["object"].get("size", 0)
+        ext             = os.path.splitext(filename.lower())[1]
+        is_pdf          = ext == ".pdf"
 
         LOGGER.info("Processing s3://%s/%s  doc=%s", S3_BUCKET, s3_key, document_id)
 
         if not is_pdf:
             # Images: sync Textract using S3 object (no byte limit issue)
-            _write_processing(document_id, filename, s3_key, timestamp)
+            _write_processing(document_id, filename, s3_key, timestamp, file_size_bytes)
+            import time as _time
+            started_at = _time.time()
             try:
                 resp     = textract.detect_document_text(
                     Document={"S3Object": {"Bucket": S3_BUCKET, "Name": s3_key}}
                 )
                 elements = _blocks_to_elements(resp["Blocks"])
-                _write_completed(document_id, filename, s3_key, timestamp, elements)
+                _write_completed(document_id, filename, s3_key, timestamp, elements, file_size_bytes, started_at)
             except Exception:
                 LOGGER.exception("Sync Textract failed for %s", s3_key)
                 table.update_item(
@@ -141,7 +153,7 @@ def handler(event, context):
             continue
 
         # PDFs: copy to ap-south-1 Textract bucket, start async job
-        _write_processing(document_id, filename, s3_key, timestamp)
+        _write_processing(document_id, filename, s3_key, timestamp, file_size_bytes)
         try:
             s3_textract.copy_object(
                 CopySource={"Bucket": S3_BUCKET, "Key": s3_key},
