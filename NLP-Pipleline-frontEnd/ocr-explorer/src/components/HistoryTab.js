@@ -186,8 +186,10 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownl
         {time && <span>⏱ {time}</span>}
         <span>{formatDate(item.uploaded_at)}</span>
       </div>
-      <p className="hcard-id">{item.document_id}</p>
+      <p className="hcard-id">Doc-ID - {item.document_id}</p>
       <div className="hcard-actions">
+        <span>OCR Task</span>
+        {/* <h6>OCR Tasks</h6> */}
         <button className="hcard-btn" onClick={() => onViewDoc(item.document_id)} disabled={busy}>
           {isLoading ? <><span className="spinner" /> …</> : '⊞ Doc'}
         </button>
@@ -198,6 +200,23 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownl
           {isLoading ? <><span className="spinner" /> …</> : '⧉ Compare'}
         </button>
         <button className="hcard-btn hcard-btn-download" onClick={() => onDownload(item.document_id)} disabled={busy}>
+          {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
+        </button>
+      </div>
+
+      <div className="hcard-actions">
+        <span>NLP Task</span>
+        {/* <h6>OCR Tasks</h6> */}
+        <button className="hcard-btn" disabled={busy}>
+          {isLoading ? <><span className="spinner" /> …</> : '⊞ Process'}
+        </button>
+        <button className="hcard-btn" disabled={busy}>
+          {isLoading ? <><span className="spinner" /> …</> : '≡ NER'}
+        </button>
+        <button className="hcard-btn hcard-btn-compare" disabled={busy}>
+          {isLoading ? <><span className="spinner" /> …</> : '⧉ Modeling'}
+        </button>
+        <button className="hcard-btn hcard-btn-download" disabled={busy}>
           {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
         </button>
       </div>
