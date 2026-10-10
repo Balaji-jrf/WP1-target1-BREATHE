@@ -4,12 +4,11 @@ Starter Lambda
 Triggered by S3 PutObject on jrf-task-ocr-docs-bucket (uploads/* prefix).
 
 Flow:
-  1. Parse document_id and filename from S3 key
-  2. Write "processing" record to DynamoDB
-  3. Copy file to Textract bucket (ap-south-1) for PDFs
-  4. Run Textract (sync for images, async for PDFs)
-  5. Write OCR JSON to S3: processed/{document_id}/ocr.json
-  6. Update DynamoDB with ocr_s3_key + metadata (no ocr_result blob)
+  Images: sync Textract → write ocr.json to S3 → mark completed
+  PDFs:   copy to Textract bucket → start async job → poll until done
+          → write ocr.json to S3 → mark completed
+
+Retrieval Lambda never touches Textract — it only reads DynamoDB + S3.
 """
 
 from __future__ import annotations
@@ -32,21 +31,15 @@ S3_TEXTRACT_BUCKET = os.environ.get("S3_TEXTRACT_BUCKET", "jrf-task-ocr-textract
 DYNAMO_TABLE       = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
 TEXTRACT_REGION    = os.environ.get("TEXTRACT_REGION", "ap-south-1")
 
+# Poll interval and max wait for async Textract jobs (Lambda timeout is 900s)
+POLL_INTERVAL_S = 10
+POLL_MAX_S      = 850  # leave 50s buffer before Lambda timeout
+
 s3          = boto3.client("s3", region_name="ap-south-2")
 s3_textract = boto3.client("s3", region_name="ap-south-1")
 textract    = boto3.client("textract", region_name=TEXTRACT_REGION)
 dynamo      = boto3.resource("dynamodb", region_name="ap-south-2")
 table       = dynamo.Table(DYNAMO_TABLE)
-
-CONTENT_TYPES = {
-    ".pdf":  "application/pdf",
-    ".png":  "image/png",
-    ".jpg":  "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".tif":  "image/tiff",
-    ".tiff": "image/tiff",
-    ".webp": "image/webp",
-}
 
 
 def _blocks_to_elements(blocks: list) -> list[dict]:
@@ -70,18 +63,16 @@ def _blocks_to_elements(blocks: list) -> list[dict]:
 
 
 def _save_ocr_to_s3(document_id: str, filename: str, elements: list) -> str:
-    """Write OCR JSON to processed/{document_id}/ocr.json, return the S3 key."""
     ocr_s3_key = f"processed/{document_id}/ocr.json"
-    payload = {
-        "document_id": document_id,
-        "filename":    filename,
-        "total_pages": max((e["page"] for e in elements), default=1),
-        "elements":    elements,
-    }
     s3.put_object(
         Bucket=S3_BUCKET,
         Key=ocr_s3_key,
-        Body=json.dumps(payload),
+        Body=json.dumps({
+            "document_id": document_id,
+            "filename":    filename,
+            "total_pages": max((e["page"] for e in elements), default=1),
+            "elements":    elements,
+        }),
         ContentType="application/json",
     )
     LOGGER.info("OCR JSON saved: s3://%s/%s  elements=%d", S3_BUCKET, ocr_s3_key, len(elements))
@@ -106,16 +97,16 @@ def _write_completed(document_id, filename, s3_key, timestamp,
                      ocr_s3_key, elements, file_size_bytes=0, started_at=None):
     total_pages = max((e["page"] for e in elements), default=1)
     item = {
-        "document_id":            document_id,
-        "filename":               filename,
-        "s3_bucket":              S3_BUCKET,
-        "s3_key":                 s3_key,
-        "uploaded_at":            timestamp,
-        "file_size_bytes":        Decimal(str(file_size_bytes)),
-        "total_pages":            total_pages,
-        "element_count":          len(elements),
-        "status":                 "completed",
-        "ocr_s3_key":             ocr_s3_key,
+        "document_id":     document_id,
+        "filename":        filename,
+        "s3_bucket":       S3_BUCKET,
+        "s3_key":          s3_key,
+        "uploaded_at":     timestamp,
+        "file_size_bytes": Decimal(str(file_size_bytes)),
+        "total_pages":     total_pages,
+        "element_count":   len(elements),
+        "status":          "completed",
+        "ocr_s3_key":      ocr_s3_key,
     }
     if started_at is not None:
         item["processing_time_seconds"] = Decimal(str(round(time.time() - started_at, 1)))
@@ -132,6 +123,40 @@ def _mark_failed(document_id):
     )
 
 
+def _poll_async_job(job_id: str) -> list[dict]:
+    """
+    Poll Textract async job until SUCCEEDED or FAILED.
+    Waits up to POLL_MAX_S seconds inside the Lambda (no API Gateway in the way).
+    Returns elements list on success, raises on failure/timeout.
+    """
+    deadline = time.time() + POLL_MAX_S
+    attempt  = 0
+
+    while time.time() < deadline:
+        attempt += 1
+        result     = textract.get_document_text_detection(JobId=job_id)
+        job_status = result["JobStatus"]
+        LOGGER.info("Textract job %s — status=%s attempt=%d", job_id, job_status, attempt)
+
+        if job_status == "SUCCEEDED":
+            blocks = result["Blocks"]
+            while "NextToken" in result:
+                result = textract.get_document_text_detection(
+                    JobId=job_id, NextToken=result["NextToken"]
+                )
+                blocks.extend(result["Blocks"])
+            LOGGER.info("Textract job %s — collected %d blocks", job_id, len(blocks))
+            return _blocks_to_elements(blocks)
+
+        if job_status == "FAILED":
+            raise RuntimeError(f"Textract job {job_id} FAILED")
+
+        # IN_PROGRESS — wait and retry
+        time.sleep(POLL_INTERVAL_S)
+
+    raise TimeoutError(f"Textract job {job_id} did not complete within {POLL_MAX_S}s")
+
+
 def handler(event, context):
     for record in event.get("Records", []):
         s3_key          = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
@@ -146,17 +171,18 @@ def handler(event, context):
         file_size_bytes = record["s3"]["object"].get("size", 0)
         is_pdf          = os.path.splitext(filename.lower())[1] == ".pdf"
 
-        LOGGER.info("Processing s3://%s/%s  doc=%s", S3_BUCKET, s3_key, document_id)
+        LOGGER.info("Processing s3://%s/%s  doc=%s  size=%d",
+                    S3_BUCKET, s3_key, document_id, file_size_bytes)
         _write_processing(document_id, filename, s3_key, timestamp, file_size_bytes)
+        started_at = time.time()
 
         if not is_pdf:
-            started_at = time.time()
             try:
-                resp     = textract.detect_document_text(
+                resp       = textract.detect_document_text(
                     Document={"S3Object": {"Bucket": S3_BUCKET, "Name": s3_key}}
                 )
-                elements    = _blocks_to_elements(resp["Blocks"])
-                ocr_s3_key  = _save_ocr_to_s3(document_id, filename, elements)
+                elements   = _blocks_to_elements(resp["Blocks"])
+                ocr_s3_key = _save_ocr_to_s3(document_id, filename, elements)
                 _write_completed(document_id, filename, s3_key, timestamp,
                                  ocr_s3_key, elements, file_size_bytes, started_at)
             except Exception:
@@ -164,7 +190,7 @@ def handler(event, context):
                 _mark_failed(document_id)
             continue
 
-        # PDFs — copy to ap-south-1, start async job
+        # PDFs — copy to ap-south-1, start async job, poll to completion here
         try:
             s3_textract.copy_object(
                 CopySource={"Bucket": S3_BUCKET, "Key": s3_key},
@@ -176,11 +202,20 @@ def handler(event, context):
             )
             job_id = job["JobId"]
             LOGGER.info("Textract async job started: %s for doc %s", job_id, document_id)
+
+            # Store job_id so the frontend can see it during polling
             table.update_item(
                 Key={"document_id": document_id},
                 UpdateExpression="SET textract_job_id = :j",
                 ExpressionAttributeValues={":j": job_id},
             )
+
+            # Poll to completion inside this Lambda (900s timeout, no API Gateway)
+            elements   = _poll_async_job(job_id)
+            ocr_s3_key = _save_ocr_to_s3(document_id, filename, elements)
+            _write_completed(document_id, filename, s3_key, timestamp,
+                             ocr_s3_key, elements, file_size_bytes, started_at)
+
         except Exception:
-            LOGGER.exception("Failed to start Textract job for %s", s3_key)
+            LOGGER.exception("PDF processing failed for %s", s3_key)
             _mark_failed(document_id)
