@@ -246,7 +246,13 @@ export default function HistoryTab({ onCountChange }) {
       setHistory(docs);
       onCountChange?.(docs.length);
     } catch (err) {
-      setHistoryError(err.message);
+      const isLocalDevelopment = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+      const isNetworkFailure = err instanceof TypeError;
+      setHistoryError(
+        isLocalDevelopment && isNetworkFailure
+          ? 'The local OCR API is unavailable at http://localhost:8000. Start the backend, or set REACT_APP_API_URL in .env to your deployed API URL and restart the frontend.'
+          : err.message
+      );
     } finally {
       setHistoryLoading(false);
     }
