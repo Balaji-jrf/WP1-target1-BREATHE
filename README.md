@@ -3,8 +3,9 @@
 This is the OCR and NLP pipeline for the BREATHE research project.
 It digitises historical documents — policy papers, archival records, speeches, grey literature —
 and extracts structured text ready for NLP analysis.
-
 ---
+MainApp Link - https://jrf-nlp-pipeline.skillrouteai.com
+TestApp Link - https://test-jrf-app.skillrouteai.com
 
 ## What this project does
 
