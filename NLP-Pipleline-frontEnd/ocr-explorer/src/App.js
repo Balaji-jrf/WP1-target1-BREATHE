@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState } from 'react';
 import './App.css';
 import ExtractTab from './components/ExtractTab';
 import HistoryTab from './components/HistoryTab';
