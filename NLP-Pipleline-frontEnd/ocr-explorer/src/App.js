@@ -17,7 +17,13 @@ export default function App() {
         </div>
         <nav className="tab-nav">
           <button className={tab === 'extract' ? 'tab active' : 'tab'} onClick={() => setTab('extract')}>
-            Extract
+            Input Extract
+          </button>
+          <button className={tab === 'nlp' ? 'tab active' : 'tab'} onClick={() => setTab('nlp')}>
+            NLP Model
+          </button>
+          <button className={tab === 'atlas' ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>
+            Atlas
           </button>
           <button className={tab === 'history' ? 'tab active' : 'tab'} onClick={() => setTab('history')}>
             History {historyCount > 0 && <span className="badge">{historyCount}</span>}
