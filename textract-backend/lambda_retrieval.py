@@ -15,11 +15,13 @@ import logging
 import os
 
 import boto3
+from botocore.config import Config
 
 LOGGER       = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
-DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "DocumentOCR")
+DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "jrf-task-ocr-DocumentOCR")
+AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 
 CONTENT_TYPES = {
     ".pdf":  "application/pdf",
@@ -28,13 +30,16 @@ CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".tif":  "image/tiff",
     ".tiff": "image/tiff",
-    ".webp": "image/webp",
 }
 
-dynamo = boto3.resource("dynamodb", region_name="ap-south-2")
+dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
 table  = dynamo.Table(DYNAMO_TABLE)
-s3     = boto3.client("s3", region_name="ap-south-2",
-                      endpoint_url="https://s3.ap-south-2.amazonaws.com")
+s3 = boto3.client(
+    "s3",
+    region_name=AWS_REGION,
+    endpoint_url=f"https://s3.{AWS_REGION}.amazonaws.com",
+    config=Config(signature_version="s3v4"),
+)
 
 
 def _cors_headers() -> dict:
@@ -56,7 +61,8 @@ def _response(status: int, body) -> dict:
 def _list_documents() -> dict:
     items, kwargs = [], {
         "ProjectionExpression": "document_id, filename, total_pages, element_count, "
-                                "uploaded_at, #st, file_size_bytes, processing_time_seconds",
+                                "table_count, figure_count, uploaded_at, #st, file_size_bytes, "
+                                "processing_time_seconds",
         "ExpressionAttributeNames": {"#st": "status"},
     }
     while True:
@@ -102,6 +108,30 @@ def _get_document(document_id: str) -> dict | None:
             )
         except Exception:
             LOGGER.warning("Could not generate OCR presigned URL for %s", document_id)
+
+        try:
+            ocr_object = s3.get_object(
+                Bucket=item["s3_bucket"],
+                Key=item["ocr_s3_key"],
+            )
+            ocr_data = json.loads(ocr_object["Body"].read())
+            item["figure_presigned_urls"] = {
+                figure["image_s3_key"]: s3.generate_presigned_url(
+                    "get_object",
+                    Params={
+                        "Bucket": item["s3_bucket"],
+                        "Key": figure["image_s3_key"],
+                    },
+                    ExpiresIn=3600,
+                )
+                for figure in ocr_data.get("figures", [])
+                if figure.get("crop_status") == "saved" and figure.get("image_s3_key")
+            }
+        except Exception:
+            LOGGER.exception("Could not generate figure URLs for %s", document_id)
+            item["figure_presigned_url_error"] = (
+                "Figure previews are temporarily unavailable."
+            )
 
     return item
 

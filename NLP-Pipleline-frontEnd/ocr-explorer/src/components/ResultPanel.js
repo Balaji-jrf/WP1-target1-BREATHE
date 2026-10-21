@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import Modal from './Modal';
-
-const formatConfidence = (c) => `${Math.round((parseFloat(c) || 0) * 100)}%`;
+import OcrResults from './OcrResults';
 
 function ResultActions({ result, docUrl }) {
   const [showDoc, setShowDoc] = useState(false);
@@ -49,7 +48,11 @@ function ResultActions({ result, docUrl }) {
             <span>{result.elements?.length || 0} text blocks</span>
             {result.uploaded_at && <span>{new Date(result.uploaded_at).toLocaleString('en-IN')}</span>}
           </div>
-          <pre className="modal-json">{JSON.stringify(result, null, 2)}</pre>
+          <OcrResults result={result} />
+          <details className="modal-json-details">
+            <summary>View raw JSON payload</summary>
+            <pre className="modal-json">{JSON.stringify(result, null, 2)}</pre>
+          </details>
         </Modal>
       )}
     </>
@@ -86,21 +89,7 @@ export default function ResultPanel({ result, docUrl, kicker }) {
         </div>
       )}
 
-      <div className="result-list">
-        {result.elements?.length
-          ? result.elements.map((el, i) => (
-            <article className="result-item" key={`${el.page}-${i}`}>
-              <div className="item-meta">
-                <span>PAGE {String(el.page).padStart(2, '0')}</span>
-                <span>{formatConfidence(el.confidence)} confidence</span>
-              </div>
-              <p>{el.text}</p>
-              <small>bbox [{el.bbox.map(v => parseFloat(v).toFixed(3)).join(', ')}]</small>
-            </article>
-          ))
-          : <p className="empty-result">No text was detected in this document.</p>
-        }
-      </div>
+      <OcrResults result={result} />
 
       <details className="json-details">
         <summary>View raw JSON payload <span>+</span></summary>

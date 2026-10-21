@@ -1,211 +1,199 @@
-# NLP Pipeline — Backend
+# BREATHE NLP Pipeline — Backend
 
-## Architecture
+AWS OCR ingestion and retrieval services for the BREATHE research project.
 
-```
+## Deployed resources
+
+| Resource | Name | Region |
+|---|---|---|
+| S3 bucket | `jrf-task-ocr-931092012939-ap-southeast-2` | `ap-southeast-2` |
+| DynamoDB table | `jrf-task-ocr-DocumentOCR` | `ap-southeast-2` |
+| HTTP API | `jrf-task-ocr-api` (`o0dqnexpsg`) | `ap-southeast-2` |
+| API stage/base URL | `prod` — `https://o0dqnexpsg.execute-api.ap-southeast-2.amazonaws.com/prod` | `ap-southeast-2` |
+
+## Request and processing flow
+
+```text
 Browser
-  │
-  ├─ 1. GET /upload-url?filename=foo.pdf
-  │       └─ breathe-textract-processor  (lambda_processor.py)
-  │          Generates presigned S3 PUT URL + document_id (UUID)
-  │          Returns: { upload_url, document_id, s3_key, content_type }
-  │
-  ├─ 2. PUT file → S3 directly (bypasses API Gateway — no size limit)
-  │       Bucket: jrf-task-ocr-docs-bucket (ap-south-2)
-  │       Key:    uploads/{document_id}/{filename}
-  │
-  │       S3 PutObject event fires automatically →
-  │       └─ breathe-textract-starter  (lambda_starter.py)  [900s timeout]
-  │
-  │          Images (PNG/JPEG/TIFF/WebP):
-  │            1. Write status=processing to DynamoDB
-  │            2. Call Textract DetectDocumentText (sync, ~2s)
-  │            3. Write ocr.json → S3: processed/{document_id}/ocr.json
-  │            4. Write status=completed to DynamoDB
-  │
-  │          PDFs:
-  │            1. Write status=processing to DynamoDB
-  │            2. Copy PDF to jrf-task-ocr-textract-bucket (ap-south-1)
-  │            3. Start Textract StartDocumentTextDetection (async)
-  │            4. Store textract_job_id in DynamoDB
-  │            5. Poll GetDocumentTextDetection every 10s (up to 850s)
-  │               — all inside this Lambda, no API Gateway involved —
-  │            6. Write ocr.json → S3: processed/{document_id}/ocr.json
-  │            7. Write status=completed to DynamoDB
-  │
-  └─ 3. GET /document/{id}  (frontend polls every 5s)
-          └─ breathe-textract-retrieval  (lambda_retrieval.py)  [pure reader]
-             - DynamoDB get_item  (~10ms)
-             - If completed: S3 get_object on ocr.json, inline elements
-             - Generate presigned GET URL for original document (1hr)
-             - Returns full response in ~100ms regardless of doc size
-             - Never calls Textract
+  ├─ GET /upload-url?filename=report.pdf
+  │    └─ jrf-task-ocr-upload-url
+  │         returns document_id + 15-minute presigned S3 PUT URL
+  ├─ PUT file directly to S3: uploads/{document_id}/{filename}
+  │    └─ S3 ObjectCreated notification invokes jrf-task-ocr-starter
+  │         ├─ PNG/JPEG: AnalyzeDocument with TABLES + LAYOUT (synchronous)
+  │         └─ PDF/TIFF: StartDocumentAnalysis and poll GetDocumentAnalysis
+  │         ├─ writes processed/{document_id}/ocr.json and figure PNG crops
+  │         └─ records processing status and metadata in DynamoDB
+  ├─ GET /document/{document_id}
+  │    └─ jrf-task-ocr-retrieval returns status and presigned document/OCR URLs
+  └─ GET /documents
+       └─ jrf-task-ocr-retrieval lists document metadata for History
 ```
 
----
+The S3 notification is filtered to the `uploads/` prefix. OCR output is written under
+`processed/`, so output writes do not invoke the starter again.
 
-## S3 storage layout
+## S3 object layout
 
-```
-jrf-task-ocr-docs-bucket  (ap-south-2 — permanent)
-├── uploads/
-│   └── {document_id}/
-│       └── {filename}            ← original uploaded file
-└── processed/
-    └── {document_id}/
-        └── ocr.json              ← full OCR result (any size, no DynamoDB limit)
-
-jrf-task-ocr-textract-bucket  (ap-south-1 — Textract input only)
-└── uploads/
-    └── {document_id}/
-        └── {filename}            ← PDF copy for Textract (can auto-delete after 7 days)
+```text
+jrf-task-ocr-931092012939-ap-southeast-2/
+├── uploads/{document_id}/{filename}       original input
+├── processed/{document_id}/ocr.json       OCR JSON
+└── processed/{document_id}/figures/*.png  rendered figure crops
 ```
 
----
+The bucket is private. The browser uses presigned URLs; do not make the bucket public.
+Its CORS configuration must include each frontend origin that needs browser PUT, GET,
+and HEAD access. The configured origins currently include the production site, test
+site, and `http://localhost:3000`.
 
-## ocr.json structure
+## OCR JSON
 
 ```json
 {
-  "document_id": "b8279669-2293-44d4-87d6-649875fa78b6",
-  "filename":    "1937 Some-Economic facts and figures.pdf",
-  "total_pages": 53,
+  "document_id": "uuid",
+  "filename": "report.pdf",
+  "total_pages": 1,
   "elements": [
     {
-      "page":       1,
-      "text":       "SOME ECONOMIC FACTS AND FIGURES",
+      "page": 1,
+      "text": "Detected text",
       "confidence": 0.9987,
-      "bbox":       [0.1823, 0.0412, 0.8177, 0.0601]
+      "bbox": [0.1, 0.2, 0.8, 0.3]
+    }
+  ],
+  "layout": [
+    {"type": "title", "page": 1, "text": "Report", "bbox": [0.1, 0.1, 0.8, 0.2]}
+  ],
+  "tables": [
+    {"page": 1, "bbox": [0.1, 0.2, 0.8, 0.5], "rows": [["Item", "Count"]]}
+  ],
+  "figures": [
+    {
+      "figure_id": "figure-0001",
+      "page": 1,
+      "bbox": [0.1, 0.5, 0.8, 0.9],
+      "crop_status": "saved",
+      "image_s3_key": "processed/uuid/figures/page-0001-figure-0001.png"
     }
   ]
 }
 ```
 
-- `confidence` — 0.0 to 1.0 (Textract's raw value divided by 100)
-- `bbox` — `[left, top, right, bottom]` as fractions of page size (0.0–1.0)
-- Only `LINE` blocks are stored — `WORD` and `PAGE` blocks are discarded
+- `elements` preserves line text, confidence (0–1), page, and normalized bounding box.
+- `layout` contains Textract layout types and associated text where available.
+- `tables` contains table cell text arranged by row and column.
+- `figures` contains the detected page and normalized bounding box, crop status, and
+  S3 object key when the PNG crop was saved. Retrieval signs crop URLs for the browser;
+  temporary URLs are not persisted in OCR JSON.
 
----
+## DynamoDB table
 
-## DynamoDB — DocumentOCR (ap-south-2)
+Table: `jrf-task-ocr-DocumentOCR`
 
-Partition key: `document_id` (String). No sort key. One item = one document.
+Partition key: `document_id` (String), no sort key.
 
-| Field | Type | Notes |
-|---|---|---|
-| `document_id` | String (PK) | UUID |
-| `filename` | String | Original filename |
-| `status` | String | `processing` / `completed` / `failed` |
-| `s3_bucket` | String | `jrf-task-ocr-docs-bucket` |
-| `s3_key` | String | `uploads/{document_id}/{filename}` |
-| `ocr_s3_key` | String | `processed/{document_id}/ocr.json` — set when completed |
-| `textract_job_id` | String | PDF async job ID — present only during processing |
-| `total_pages` | Number | Set when completed |
-| `element_count` | Number | Set when completed |
-| `file_size_bytes` | Number | From S3 event |
-| `processing_time_seconds` | Number | Wall-clock seconds from upload to completion |
-| `uploaded_at` | String | ISO 8601 UTC |
+The table stores document metadata and status (`processing`, `completed`, or `failed`).
+OCR JSON remains in S3 to avoid DynamoDB's item-size limit. Common attributes include
+`filename`, `s3_bucket`, `s3_key`, `ocr_s3_key`, `total_pages`, `element_count`,
+`table_count`, `figure_count`, `uploaded_at`, `file_size_bytes`, and
+`processing_time_seconds`.
 
-DynamoDB items are metadata only — the OCR text lives in `ocr.json` in S3.
-No DynamoDB 400 KB item size limit risk regardless of document length.
+## Lambda functions and roles
 
----
-
-## Lambda functions
-
-| Function | File | Trigger | Timeout |
+| Function | Handler source | Execution role | Purpose |
 |---|---|---|---|
-| `breathe-textract-processor` | `lambda_processor.py` | `GET /upload-url` | 30s |
-| `breathe-textract-starter` | `lambda_starter.py` | S3 PutObject `uploads/*` | 900s |
-| `breathe-textract-retrieval` | `lambda_retrieval.py` | `GET /documents`, `GET /document/{id}` | 120s |
+| `jrf-task-ocr-upload-url` | `lambda_processor.py` | `jrf-task-ocr-upload-url-role` | Signs browser upload URLs |
+| `jrf-task-ocr-starter` | `lambda_starter.py` | `jrf-task-ocr-starter-role` | Runs Textract after S3 upload |
+| `jrf-task-ocr-retrieval` | `lambda_retrieval.py` | `jrf-task-ocr-retrieval-role` | Reads metadata and signs result URLs |
 
----
+Each role includes `AWSLambdaBasicExecutionRole` for CloudWatch Logs and a scoped inline
+policy for its service access. The upload role can `s3:PutObject` only under `uploads/*`.
+The starter accesses the OCR bucket, the OCR table, and Textract analysis APIs. The
+retrieval role can read the OCR table and generate URLs for objects under `uploads/*`
+and `processed/*`.
 
-## API Gateway routes
+The starter Lambda needs PyMuPDF to render and crop detected figure regions. Its
+dependency is listed in `requirements.txt`; include it in the deployment package for
+the same Python runtime and architecture as the Lambda. Build the package in a
+Linux-compatible environment, install the requirements into a staging directory, copy
+`lambda_starter.py` there, and zip the staging contents before updating the function.
+The package must remain within Lambda deployment size limits. The starter role needs
+`s3:GetObject` on `uploads/*` and `s3:PutObject` on `processed/*`.
 
-HTTP API id: `cblo1ukhb4`, region: `ap-south-2`
-
-| Method | Path | Lambda |
-|---|---|---|
-| GET | `/upload-url` | breathe-textract-processor |
-| GET | `/documents` | breathe-textract-retrieval |
-| GET | `/document/{document_id}` | breathe-textract-retrieval |
-
----
-
-## Environment variables
-
-### breathe-textract-processor
-| Key | Value |
-|---|---|
-| `S3_BUCKET` | `jrf-task-ocr-docs-bucket` |
-| `ALLOWED_ORIGIN` | `https://jrf-nlp-pipeline.skillrouteai.com` |
-
-### breathe-textract-starter
-| Key | Value |
-|---|---|
-| `S3_BUCKET` | `jrf-task-ocr-docs-bucket` |
-| `S3_TEXTRACT_BUCKET` | `jrf-task-ocr-textract-bucket` |
-| `DYNAMO_TABLE` | `DocumentOCR` |
-| `TEXTRACT_REGION` | `ap-south-1` |
-
-### breathe-textract-retrieval
-| Key | Value |
-|---|---|
-| `DYNAMO_TABLE` | `DocumentOCR` |
-| `ALLOWED_ORIGIN` | `https://jrf-nlp-pipeline.skillrouteai.com` |
-
----
-
-## IAM role — breathe-textract-lambda-role
-
-| Service | Actions |
-|---|---|
-| S3 `jrf-task-ocr-docs-bucket/*` | `GetObject`, `PutObject`, `CopyObject` |
-| S3 `jrf-task-ocr-textract-bucket/*` | `GetObject`, `PutObject`, `CopyObject` |
-| DynamoDB `DocumentOCR` | `PutItem`, `GetItem`, `Scan`, `UpdateItem` |
-| Textract | `DetectDocumentText`, `StartDocumentTextDetection`, `GetDocumentTextDetection` |
-
----
-
-## Limits
-
-| Item | Limit | Notes |
-|---|---|---|
-| Upload file size | None | Direct S3 PUT, bypasses API Gateway |
-| PDF pages | 500+ | Textract async supports up to 3000 pages |
-| Processing time | 850s max | Starter Lambda polls internally, 900s timeout |
-| Poll response time | ~100ms | Retrieval Lambda is a pure reader — no Textract calls |
-| Presigned URL validity | 1 hour | For both document view and OCR JSON |
-
----
-
-## Deploy
+Example package commands (run from `textract-backend/` in a compatible Linux
+environment):
 
 ```bash
-cd textract-backend
-
-zip -j processor.zip lambda_processor.py
-aws lambda update-function-code --function-name breathe-textract-processor \
-  --zip-file fileb://processor.zip --region ap-south-2
-
-zip -j starter.zip lambda_starter.py
-aws lambda update-function-code --function-name breathe-textract-starter \
-  --zip-file fileb://starter.zip --region ap-south-2
-
-zip -j retrieval.zip lambda_retrieval.py
-aws lambda update-function-code --function-name breathe-textract-retrieval \
-  --zip-file fileb://retrieval.zip --region ap-south-2
+mkdir -p build-starter
+python3 -m pip install -r requirements.txt -t build-starter/
+cp lambda_starter.py build-starter/
+(cd build-starter && zip -r ../starter.zip .)
 ```
 
----
+Only documents processed after deploying this version get figure crops automatically.
+Older records continue to display detection metadata; re-upload the source file to make
+a newly processed record with image crops.
 
-## AWS account details
+Starter environment variables:
 
-| Item | Value |
+| Variable | Value |
 |---|---|
-| Account ID | `433448338709` |
-| Primary region | `ap-south-2` (Hyderabad) |
-| Textract region | `ap-south-1` (Mumbai) |
-| Amplify app ID | `d2lfia267k9492` (ap-south-1) |
-| GitHub repo | `https://github.com/Balaji-jrf/WP1-target1-BREATHE` |
+| `S3_BUCKET` | `jrf-task-ocr-931092012939-ap-southeast-2` |
+| `DYNAMO_TABLE` | `jrf-task-ocr-DocumentOCR` |
+
+Upload URL environment variables:
+
+| Variable | Value |
+|---|---|
+| `S3_BUCKET` | `jrf-task-ocr-931092012939-ap-southeast-2` |
+| `ALLOWED_ORIGIN` | Frontend origin |
+
+Retrieval environment variables:
+
+| Variable | Value |
+|---|---|
+| `DYNAMO_TABLE` | `jrf-task-ocr-DocumentOCR` |
+| `ALLOWED_ORIGIN` | Frontend origin |
+
+Lambda provides `AWS_REGION` automatically. All functions and AWS clients use
+`ap-southeast-2`.
+
+## HTTP API routes
+
+| Method | Path | Integration |
+|---|---|---|
+| `GET` | `/upload-url` | `jrf-task-ocr-upload-url` |
+| `GET` | `/documents` | `jrf-task-ocr-retrieval` |
+| `GET` | `/document/{document_id}` | `jrf-task-ocr-retrieval` |
+
+The deployed `prod` stage has CORS configured for the production frontend and
+`http://localhost:3000`. API routes currently use no authentication; CORS does not
+protect the API from non-browser clients. Add authentication and request controls before
+using it for sensitive documents or unrestricted public access.
+
+## Local validation
+
+From the repository root:
+
+```bash
+python3 -m venv textract-backend/.venv
+textract-backend/.venv/bin/python -m pip install \
+  -r textract-backend/requirements.txt
+textract-backend/.venv/bin/python -m pip install boto3
+textract-backend/.venv/bin/python -m unittest discover \
+  -s textract-backend -p 'test_*.py' -v
+```
+
+Compile the Lambda source separately with:
+
+```bash
+python3 -m py_compile \
+  textract-backend/lambda_processor.py \
+  textract-backend/lambda_starter.py \
+  textract-backend/lambda_retrieval.py
+```
+
+The unit tests cover upload URL validation, OCR block parsing, PDF/raster figure
+cropping, and signing crop URLs. A synthetic PNG and a synthetic PDF containing a table
+have also been processed successfully in the Sydney account.

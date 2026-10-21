@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { uploadDocument } from '../api';
 import ResultPanel from './ResultPanel';
 
-const ACCEPTED_TYPES = '.png,.jpg,.jpeg,.tif,.tiff,.webp,.pdf';
+const ACCEPTED_TYPES = '.png,.jpg,.jpeg,.tif,.tiff,.pdf';
 
 export default function ExtractTab() {
   const [file, setFile] = useState(null);
@@ -15,8 +15,8 @@ export default function ExtractTab() {
 
   const chooseFile = (nextFile) => {
     if (!nextFile) return;
-    const isSupported = /\.(pdf|png|jpe?g|tiff?|webp)$/i.test(nextFile.name);
-    if (!isSupported) { setError('Please choose a PDF, PNG, JPEG, TIFF, or WebP file.'); return; }
+    const isSupported = /\.(pdf|png|jpe?g|tiff?)$/i.test(nextFile.name);
+    if (!isSupported) { setError('Please choose a PDF, PNG, JPEG, or TIFF file.'); return; }
     setFile(nextFile);
     setResult(null);
     setError('');
@@ -74,7 +74,7 @@ export default function ExtractTab() {
             <div className="upload-icon">↑</div>
             {file
               ? <><p className="drop-title">{file.name}</p><p className="drop-note">{(file.size / 1024 / 1024).toFixed(2)} MB · Ready to process</p></>
-              : <><p className="drop-title">Drop a document here</p><p className="drop-note">or click to browse · PDF, PNG, JPEG, TIFF, WebP</p></>
+              : <><p className="drop-title">Drop a document here</p><p className="drop-note">or click to browse · PDF, PNG, JPEG, TIFF</p></>
             }
           </div>
           <div className="action-row">

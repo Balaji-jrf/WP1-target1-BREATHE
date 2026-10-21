@@ -22,16 +22,19 @@ import os
 import uuid
 
 import boto3
+from botocore.config import Config
 
 LOGGER    = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
 
-S3_BUCKET = os.environ.get("S3_BUCKET", "jrf-task-ocr-docs-bucket")
+AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
+S3_BUCKET = os.environ.get("S3_BUCKET")
 
 s3 = boto3.client(
     "s3",
-    region_name="ap-south-2",
-    endpoint_url="https://s3.ap-south-2.amazonaws.com",
+    region_name=AWS_REGION,
+    endpoint_url=f"https://s3.{AWS_REGION}.amazonaws.com",
+    config=Config(signature_version="s3v4"),
 )
 
 CONTENT_TYPES = {
@@ -41,7 +44,6 @@ CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".tif":  "image/tiff",
     ".tiff": "image/tiff",
-    ".webp": "image/webp",
 }
 
 ALLOWED_EXTENSIONS = set(CONTENT_TYPES.keys())
@@ -69,15 +71,28 @@ def handler(event: dict, context) -> dict:
     if method == "OPTIONS":
         return _response(200, {})
 
+    if not S3_BUCKET:
+        LOGGER.error("S3_BUCKET environment variable is required")
+        return _response(500, {"detail": "Upload service is not configured"})
+
     qs       = event.get("queryStringParameters") or {}
     filename = (qs.get("filename") or "").strip()
 
     if not filename:
         return _response(400, {"detail": "filename query parameter is required"})
+    if (
+        len(filename) > 255
+        or "/" in filename
+        or "\\" in filename
+        or any(ord(character) < 32 for character in filename)
+    ):
+        return _response(400, {"detail": "filename must be a plain file name up to 255 characters"})
 
     ext = os.path.splitext(filename.lower())[1]
     if ext not in ALLOWED_EXTENSIONS:
-        return _response(400, {"detail": f"Unsupported file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"})
+        return _response(400, {
+            "detail": f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        })
 
     content_type = CONTENT_TYPES[ext]
     document_id  = str(uuid.uuid4())

@@ -1,11 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchDocuments, fetchDocument, downloadOcrJson } from '../api';
 import Modal from './Modal';
+import OcrResults from './OcrResults';
 
 const formatDate = (iso) =>
   new Date(iso).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
-
-const formatConfidence = (c) => `${Math.round((parseFloat(c) || 0) * 100)}%`;
 
 const formatSize = (bytes) => {
   if (!bytes) return null;
@@ -55,20 +54,11 @@ function OcrModal({ item, onClose }) {
         {time && <span>⏱ {time} to process</span>}
         {item.uploaded_at && <span>{new Date(item.uploaded_at).toLocaleString('en-IN')}</span>}
       </div>
-      <div className="modal-ocr-list">
-        {item.elements?.length
-          ? item.elements.map((el, i) => (
-            <article className="modal-ocr-item" key={`ocr-${el.page}-${i}`}>
-              <div className="modal-ocr-item-meta">
-                <span>PAGE {String(el.page).padStart(2, '0')}</span>
-                <span>{formatConfidence(el.confidence)} confidence</span>
-              </div>
-              <p>{el.text}</p>
-            </article>
-          ))
-          : <p className="empty-result" style={{ padding: '24px' }}>No text detected.</p>
-        }
-      </div>
+      <OcrResults result={item} />
+      <details className="modal-json-details">
+        <summary>View raw JSON payload</summary>
+        <pre className="modal-json">{JSON.stringify(item, null, 2)}</pre>
+      </details>
     </Modal>
   );
 }
@@ -78,6 +68,12 @@ const COMPARE_DEFAULT = { w: Math.min(1100, window.innerWidth - 48), h: Math.min
 
 function CompareView({ item, docUrl, onClose }) {
   const isPdf = /\.pdf$/i.test(item?.filename || '');
+  const pages = Array.from(new Set((item.elements || []).map((element) => element.page || 1)))
+    .sort((first, second) => first - second);
+  const [selectedPage, setSelectedPage] = useState(pages[0] || 1);
+  const pageDocumentUrl = isPdf && docUrl
+    ? `${docUrl.split('#')[0]}#page=${selectedPage}&toolbar=0&navpanes=0`
+    : docUrl;
 
   // size & position state
   const [size, setSize] = useState(COMPARE_DEFAULT);
@@ -138,29 +134,41 @@ function CompareView({ item, docUrl, onClose }) {
         </div>
         <div className="compare-body">
           <div className="compare-pane">
-            <div className="compare-pane-label">Original Document</div>
+            <div className="compare-pane-label">
+              <span>Original Document</span>
+              {isPdf && (
+                <label className="compare-page-control">
+                  <span>Page</span>
+                  <select
+                    aria-label="Document page"
+                    value={selectedPage}
+                    onChange={(event) => {
+                      setSelectedPage(Number(event.target.value));
+                    }}
+                  >
+                    {Array.from({ length: Number(item.total_pages) || pages.length || 1 }, (_, index) => (
+                      <option key={index + 1} value={index + 1}>Page {index + 1}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
             {docUrl
               ? isPdf
-                ? <iframe src={docUrl} title="Document" className="compare-iframe" />
+                ? <iframe key={selectedPage} src={pageDocumentUrl} title={`Document page ${selectedPage}`} className="compare-iframe" />
                 : <img src={docUrl} alt={item.filename} className="compare-img" />
               : <div className="compare-no-doc">No document URL available</div>
             }
           </div>
           <div className="compare-pane">
-            <div className="compare-pane-label">OCR Text — {item.elements?.length || 0} blocks</div>
-            <div className="compare-ocr-scroll">
-              {item.elements?.length
-                ? item.elements.map((el, i) => (
-                  <article className="compare-ocr-item" key={`cmp-${el.page}-${i}`}>
-                    <div className="compare-ocr-meta">
-                      <span>P{String(el.page).padStart(2, '0')}</span>
-                      <span>{formatConfidence(el.confidence)}</span>
-                    </div>
-                    <p>{el.text}</p>
-                  </article>
-                ))
-                : <p className="empty-result" style={{ padding: '24px' }}>No text detected.</p>
-              }
+            <div className="compare-ocr-scroll compare-ocr-explorer">
+              <OcrResults
+                result={item}
+                pageFilter={String(selectedPage)}
+                onPageFilterChange={(page) => {
+                  setSelectedPage(Number(page));
+                }}
+              />
             </div>
           </div>
         </div>

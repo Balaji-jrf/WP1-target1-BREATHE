@@ -1,4 +1,5 @@
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_URL = process.env.REACT_APP_API_URL
+  || 'https://o0dqnexpsg.execute-api.ap-southeast-2.amazonaws.com/prod';
 
 const log = (step, msg, data) => {
   const ts = new Date().toISOString().split('T')[1].slice(0, 12);
@@ -11,6 +12,18 @@ async function fetchOcrFromS3(ocr_presigned_url) {
   const res = await fetch(ocr_presigned_url);
   if (!res.ok) throw new Error(`Failed to fetch OCR JSON from S3 (${res.status})`);
   return await res.json();
+}
+
+function attachFigureImageUrls(ocr, figurePresignedUrls = {}) {
+  return {
+    ...ocr,
+    figures: (ocr.figures || []).map((figure) => ({
+      ...figure,
+      image_url: figure.image_s3_key
+        ? figurePresignedUrls[figure.image_s3_key] || null
+        : null,
+    })),
+  };
 }
 
 export async function uploadDocument(file, onStatus) {
@@ -82,7 +95,10 @@ async function pollUntilDone(document_id, onStatus, intervalMs = 5000, maxAttemp
       log('POLL', `COMPLETED after ${elapsed}s — pages=${data.total_pages} elements=${data.element_count}`);
       // Fetch OCR JSON directly from S3 — never through API Gateway (no 6MB limit)
       log('POLL', `fetching OCR JSON from S3…`);
-      const ocr = await fetchOcrFromS3(data.ocr_presigned_url);
+      const ocr = attachFigureImageUrls(
+        await fetchOcrFromS3(data.ocr_presigned_url),
+        data.figure_presigned_urls,
+      );
       log('POLL', `OCR JSON loaded — elements=${ocr.elements?.length}`);
       return {
         document_id,
@@ -90,6 +106,10 @@ async function pollUntilDone(document_id, onStatus, intervalMs = 5000, maxAttemp
         total_pages:             ocr.total_pages,
         element_count:           data.element_count,
         elements:                ocr.elements || [],
+        layout:                  ocr.layout || [],
+        tables:                  ocr.tables || [],
+        figures:                 ocr.figures || [],
+        figure_presigned_url_error: data.figure_presigned_url_error,
         uploaded_at:             data.uploaded_at,
         file_size_bytes:         data.file_size_bytes,
         processing_time_seconds: data.processing_time_seconds,
@@ -123,9 +143,15 @@ export async function fetchDocument(document_id) {
   // Fetch OCR JSON directly from S3 if available
   if (data.ocr_presigned_url) {
     try {
-      const ocr      = await fetchOcrFromS3(data.ocr_presigned_url);
+      const ocr      = attachFigureImageUrls(
+        await fetchOcrFromS3(data.ocr_presigned_url),
+        data.figure_presigned_urls,
+      );
       data.elements  = ocr.elements || [];
       data.total_pages = ocr.total_pages ?? data.total_pages;
+      data.layout    = ocr.layout || [];
+      data.tables    = ocr.tables || [];
+      data.figures   = ocr.figures || [];
     } catch (err) {
       console.warn('[fetchDocument] Could not load OCR JSON from S3:', err.message);
     }
@@ -151,6 +177,9 @@ export async function downloadOcrJson(document_id) {
     file_size_bytes:         data.file_size_bytes,
     processing_time_seconds: data.processing_time_seconds,
     elements:                ocr.elements || [],
+    layout:                  ocr.layout || [],
+    tables:                  ocr.tables || [],
+    figures:                 ocr.figures || [],
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
