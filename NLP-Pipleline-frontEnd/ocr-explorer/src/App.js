@@ -19,8 +19,8 @@ export default function App() {
           <button className={tab === 'extract' ? 'tab active' : 'tab'} onClick={() => setTab('extract')}>
             Input Extract
           </button>
-          <button className={tab === 'nlp' ? 'tab active' : 'tab'} onClick={() => setTab('nlp')}>
-            NLP Model
+          <button className={tab === 'llm' ? 'tab active' : 'tab'} onClick={() => setTab('llm')}>
+            LLM Model
           </button>
           <button className={tab === 'atlas' ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>
             Atlas
@@ -30,7 +30,7 @@ export default function App() {
           </button>
         </nav>
         <span className="service-status"><span /> Textract ready</span>
-        <span className="service-status nlp-status"><span className="dot-orange" /> NLP Pipeline — ongoing</span>
+        <span className="service-status llm-status"><span className="dot-orange" /> LLM Model — ongoing</span>
       </header>
 
       {tab === 'extract' && <ExtractTab />}

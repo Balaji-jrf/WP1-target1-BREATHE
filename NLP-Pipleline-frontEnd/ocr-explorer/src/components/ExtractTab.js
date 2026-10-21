@@ -52,9 +52,9 @@ export default function ExtractTab() {
           </p>
         </div>
         <div className="intro-stats">
-          <strong>01</strong><span>Upload<br />document</span>
-          <strong>02</strong><span>Extract<br />text</span>
-          <strong>03</strong><span>Feed<br />NLP pipeline</span>
+          <strong>01</strong><span>Upload Historical<br />Document</span>
+          <strong>02</strong><span>Extract<br />Text, Layouts, Tables, Images</span>
+          <strong>03</strong><span>Feed<br />LLM Pipeline</span>
           <strong>04</strong><span>Going<br />On</span>
         </div>
       </section>
@@ -78,7 +78,7 @@ export default function ExtractTab() {
             }
           </div>
           <div className="action-row">
-            <p className="limit-note"><span className="lock-icon">◈</span> Processed via Amazon Textract + NLP Pipeline · Stored securely in S3 + DynamoDB</p>
+            <p className="limit-note"><span className="lock-icon">◈</span> Processed via Amazon Textract (OCR Engine) + LLM Pipeline · Stored securely in S3 + DynamoDB</p>
             <button className="process-button" type="submit" disabled={!file || loading}>
               {loading ? <><span className="spinner" /> {loadingMsg}</> : <>Extract text <span>→</span></>}
             </button>

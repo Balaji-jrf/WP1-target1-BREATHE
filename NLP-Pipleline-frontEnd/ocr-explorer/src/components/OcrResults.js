@@ -116,7 +116,7 @@ export default function OcrResults({ result, pageFilter, onPageFilterChange }) {
                 onClick={() => changeTab(tab.id)}
               >
                 <span className="ocr-tab-icon" aria-hidden="true">{tab.icon}</span>
-                {tab.label}<span className="ocr-tab-count">{count.toLocaleString()}</span>
+                {tab.label}
               </button>
             );
           })}

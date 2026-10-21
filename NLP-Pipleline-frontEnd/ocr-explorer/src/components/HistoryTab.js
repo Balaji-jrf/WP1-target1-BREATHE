@@ -196,8 +196,6 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownl
       </div>
       <p className="hcard-id">Doc-ID - {item.document_id}</p>
       <div className="hcard-actions">
-        <span>OCR Task</span>
-        {/* <h6>OCR Tasks</h6> */}
         <button className="hcard-btn" onClick={() => onViewDoc(item.document_id)} disabled={busy}>
           {isLoading ? <><span className="spinner" /> …</> : '⊞ Doc'}
         </button>
@@ -208,23 +206,6 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownl
           {isLoading ? <><span className="spinner" /> …</> : '⧉ Compare'}
         </button>
         <button className="hcard-btn hcard-btn-download" onClick={() => onDownload(item.document_id)} disabled={busy}>
-          {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
-        </button>
-      </div>
-
-      <div className="hcard-actions">
-        <span>NLP Task</span>
-        {/* <h6>OCR Tasks</h6> */}
-        <button className="hcard-btn" disabled={busy}>
-          {isLoading ? <><span className="spinner" /> …</> : '⊞ Process'}
-        </button>
-        <button className="hcard-btn" disabled={busy}>
-          {isLoading ? <><span className="spinner" /> …</> : '≡ NER'}
-        </button>
-        <button className="hcard-btn hcard-btn-compare" disabled={busy}>
-          {isLoading ? <><span className="spinner" /> …</> : '⧉ Modeling'}
-        </button>
-        <button className="hcard-btn hcard-btn-download" disabled={busy}>
           {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
         </button>
       </div>
@@ -297,10 +278,9 @@ export default function HistoryTab({ onCountChange }) {
     <section className="history-panel">
       <div className="history-header">
         <div>
-          <p className="section-kicker">Document archive</p>
           <h2 className="history-title">Processed Documents</h2>
           <p className="intro-copy">
-            Browse all extracted documents. View the original file, read the OCR text, or use Compare to see both side-by-side.
+            Browse all extracted documents, OCR output JSON. <br></br>View the original file, read the OCR text, layouts, tables, images <br></br>Use Compare to see both side-by-side, understand better
           </p>
         </div>
         <button className="clear-btn" onClick={loadHistory} disabled={historyLoading}>
