@@ -14,13 +14,14 @@ import json
 import logging
 import os
 import re
+import base64
 from decimal import Decimal
 from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
 from botocore.config import Config
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 
 LOGGER       = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
@@ -152,36 +153,81 @@ def _get_document(document_id: str) -> dict | None:
 
 
 def _get_document_records(document_id: str, params: dict) -> dict:
-    kwargs = {"KeyConditionExpression": Key("id").eq(f"DOC#{document_id}")}
-    response = records_table.query(**kwargs)
-    items = response.get("Items", [])
-    while response.get("LastEvaluatedKey"):
-        response = records_table.query(
-            **kwargs, ExclusiveStartKey=response["LastEvaluatedKey"]
-        )
-        items.extend(response.get("Items", []))
-    for field in ("theme", "district", "content_type", "entity_type", "pdf_page_num"):
+    try:
+        limit = max(1, min(int(params.get("limit", 50)), 100))
+    except (TypeError, ValueError):
+        limit = 50
+
+    filter_expression = None
+    for field in ("theme", "content_type", "entity_type"):
         wanted = (params.get(field) or "").strip()
         if wanted:
-            items = [item for item in items if str(
-                (item.get("spatial_units") or {}).get("district") or item.get("district", "")
-                if field == "district" else item.get(field, "")
-            ).casefold() == wanted.casefold()]
-    location = (params.get("location") or "").strip().casefold()
+            condition = Attr(field).eq(wanted)
+            filter_expression = condition if filter_expression is None else filter_expression & condition
+
+    page = (params.get("pdf_page_num") or "").strip()
+    if page:
+        try:
+            condition = Attr("pdf_page_num").eq(int(page))
+        except ValueError:
+            condition = Attr("pdf_page_num").eq(page)
+        filter_expression = condition if filter_expression is None else filter_expression & condition
+
+    district = (params.get("district") or "").strip()
+    if district:
+        condition = Attr("spatial_units.district").eq(district) | Attr("district").eq(district)
+        filter_expression = condition if filter_expression is None else filter_expression & condition
+
+    location = (params.get("location") or "").strip()
     if location:
-        items = [
-            item for item in items
-            if any(location in str(value).casefold()
-                   for value in (item.get("spatial_units") or {}).values())
-        ]
-    status = (params.get("status") or "approved").strip().casefold()
+        condition = (
+            Attr("spatial_units.district").contains(location)
+            | Attr("spatial_units.taluk").contains(location)
+            | Attr("spatial_units.village").contains(location)
+            | Attr("spatial_units.town").contains(location)
+            | Attr("district").contains(location)
+        )
+        filter_expression = condition if filter_expression is None else filter_expression & condition
+
+    status = (params.get("status") or "all").strip().casefold()
     if status != "all":
-        items = [
-            item for item in items
-            if str(item.get("review_status", "")).casefold() == status
-        ]
-    items.sort(key=lambda item: item.get("theme_entity_id", ""))
-    return {"document_id": document_id, "count": len(items), "records": items}
+        condition = Attr("review_status").eq(status)
+        filter_expression = condition if filter_expression is None else filter_expression & condition
+
+    start_key = None
+    token = (params.get("cursor") or "").strip()
+    if token:
+        try:
+            start_key = json.loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Invalid records pagination cursor") from error
+
+    items = []
+    last_key = start_key
+    while len(items) < limit:
+        kwargs = {
+            "KeyConditionExpression": Key("id").eq(f"DOC#{document_id}"),
+            "Limit": limit - len(items),
+        }
+        if filter_expression is not None:
+            kwargs["FilterExpression"] = filter_expression
+        if last_key:
+            kwargs["ExclusiveStartKey"] = last_key
+        response = records_table.query(**kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+
+    next_token = base64.urlsafe_b64encode(
+        json.dumps(last_key).encode("utf-8")
+    ).decode("ascii") if last_key else None
+    return {
+        "document_id": document_id,
+        "count": len(items),
+        "records": items,
+        "next_token": next_token,
+    }
 
 
 def _list_taxonomy():
@@ -450,6 +496,8 @@ def handler(event: dict, context) -> dict:
         if method == "GET":
             try:
                 return _response(200, _get_document_records(document_id, query_params))
+            except ValueError as error:
+                return _response(400, {"detail": str(error)})
             except Exception:
                 LOGGER.exception("Failed to query records for %s", document_id)
                 return _response(500, {"detail": "Failed to query records"})

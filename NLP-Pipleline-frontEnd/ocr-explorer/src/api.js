@@ -190,16 +190,29 @@ export async function downloadOcrJson(document_id) {
   URL.revokeObjectURL(url);
 }
 
-export async function fetchDocumentRecords(document_id, filters = {}) {
+export async function fetchDocumentRecordsPage(document_id, filters = {}, cursor = '') {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
+  params.set('limit', '50');
+  if (cursor) params.set('cursor', cursor);
   const suffix = params.size ? `?${params.toString()}` : '';
   const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records${suffix}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to load document records.');
-  return data.records || [];
+  return { records: data.records || [], nextToken: data.next_token || '' };
+}
+
+export async function fetchDocumentRecords(document_id, filters = {}) {
+  const records = [];
+  let cursor = '';
+  do {
+    const page = await fetchDocumentRecordsPage(document_id, filters, cursor);
+    records.push(...page.records);
+    cursor = page.nextToken;
+  } while (cursor);
+  return records;
 }
 
 export async function fetchTaxonomy() {

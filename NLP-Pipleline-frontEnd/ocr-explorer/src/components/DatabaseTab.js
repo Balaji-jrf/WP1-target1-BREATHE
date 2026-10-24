@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createDocumentRecord, deleteDocumentRecord, fetchDocuments, fetchDocumentRecords, fetchIngestionStatus, fetchTaxonomy, ingestDocumentToDatabase, updateDocumentRecord } from '../api';
+import { createDocumentRecord, deleteDocumentRecord, fetchDocuments, fetchDocumentRecords, fetchDocumentRecordsPage, fetchIngestionStatus, fetchTaxonomy, ingestDocumentToDatabase, updateDocumentRecord } from '../api';
 import ExtractionReviewModal from './ExtractionReviewModal';
 
 const display = (value) => value == null || value === '' ? '—' : String(value);
@@ -10,6 +10,10 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
   const [documents, setDocuments] = useState([]);
   const [selectedId, setSelectedId] = useState('');
   const [records, setRecords] = useState([]);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageCursors, setPageCursors] = useState(['']);
+  const [nextPageToken, setNextPageToken] = useState('');
   const [sort, setSort] = useState({ key: 'pdf_page_num', direction: 'asc' });
   const [tableContentWidth, setTableContentWidth] = useState(0);
   const [columnWidths, setColumnWidths] = useState(() => {
@@ -128,6 +132,16 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
   const syncTableScroll = (event) => {
     syncHorizontalScroll(event.currentTarget, topScrollRef.current);
   };
+  const changeFilters = (nextFilters) => {
+    setPageCursors(['']);
+    setPageIndex(0);
+    setFilters(nextFilters);
+  };
+  const selectDocument = (documentId) => {
+    setPageCursors(['']);
+    setPageIndex(0);
+    setSelectedId(documentId);
+  };
 
   const loadDocuments = useCallback(async () => {
     setLoading(true);
@@ -147,15 +161,44 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
 
   useEffect(() => {
     let active = true;
-    if (!selectedId) { setRecords([]); return undefined; }
+    if (!selectedId) { setRecords([]); setNextPageToken(''); setRecordsLoading(false); return undefined; }
     setError('');
-    fetchDocumentRecords(selectedId, filters)
-      .then((result) => { if (active) setRecords(result); })
-      .catch((err) => { if (active) setError(err.message); });
+    setRecordsLoading(true);
+    fetchDocumentRecordsPage(selectedId, filters, pageCursors[pageIndex] || '')
+      .then((result) => {
+        if (active) {
+          setRecords(result.records);
+          setNextPageToken(result.nextToken);
+        }
+      })
+      .catch((err) => { if (active) setError(err.message); })
+      .finally(() => { if (active) setRecordsLoading(false); });
     return () => { active = false; };
-  }, [selectedId, filters]);
+  }, [selectedId, filters, pageIndex, pageCursors]);
 
-  const reloadRecords = async () => setRecords(await fetchDocumentRecords(selectedId, filters));
+  const reloadRecords = async () => {
+    const result = await fetchDocumentRecordsPage(selectedId, filters, pageCursors[pageIndex] || '');
+    setRecords(result.records);
+    setNextPageToken(result.nextToken);
+  };
+
+  const refreshDatabase = async () => {
+    await loadDocuments();
+    if (!selectedId) return;
+    setRecordsLoading(true);
+    setPageIndex(0);
+    setPageCursors(['']);
+    try {
+      const result = await fetchDocumentRecordsPage(selectedId, filters, '');
+      setRecords(result.records);
+      setNextPageToken(result.nextToken);
+      setError('');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRecordsLoading(false);
+    }
+  };
 
   const ingest = async () => {
     if (!selectedId) return;
@@ -173,7 +216,7 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
       if (ingestion.status === 'failed') throw new Error(ingestion.error || 'Nova Lite extraction failed. Check the Lambda logs and retry.');
       if (ingestion.status === 'processing') throw new Error('Extraction is still running. Refresh this page shortly to review the results.');
       const staged = await fetchDocumentRecords(selectedId, { status: 'pending_review' });
-      setRecords(await fetchDocumentRecords(selectedId, filters));
+      await reloadRecords();
       setReview(staged);
       setNotice(`Extraction finished · ${staged.length} records are ready for review.`);
       await loadDocuments();
@@ -237,7 +280,7 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
       <div className="database-heading">
         <div><p className="section-kicker">DynamoDB · document registry</p><h2>Document Database</h2>
           <p>Browse OCR metadata and extracted records by document ID.</p></div>
-        <button className="clear-btn" onClick={loadDocuments} disabled={loading}>↻ Refresh</button>
+          <button className="clear-btn" onClick={refreshDatabase} disabled={loading || recordsLoading}>↻ Refresh</button>
       </div>
       {error && <div className="message error-message" role="alert">{error}</div>}
       {notice && <div className="database-notice" role="status">{notice}</div>}
@@ -249,7 +292,7 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
           {!loading && visibleDocuments.length === 0 && <p className="database-muted">No documents match this filter.</p>}
           {visibleDocuments.map((document) => (
             <button key={document.document_id} className={`database-doc-row ${selectedId === document.document_id ? 'selected' : ''}`}
-              onClick={() => setSelectedId(document.document_id)}>
+              onClick={() => selectDocument(document.document_id)}>
               <strong>{document.filename || document.document_name || 'Untitled document'}</strong>
               <code>{document.document_id}</code>
               <span>{display(document.status)} · {document.total_pages || 0} pages</span>
@@ -276,16 +319,16 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
                 ['Created', selected.uploaded_at || selected.created_at],
               ].map(([label, value]) => <div key={label}><span>{label}</span><strong>{display(value)}</strong></div>)}
             </div>
-            <div className="database-record-heading"><h3>Extracted records</h3><span>{records.length} records</span></div>
+            <div className="database-record-heading"><h3>Extracted records</h3><span>{recordsLoading ? 'Loading…' : `${records.length} shown · page ${pageIndex + 1}`}</span></div>
             <p className="record-review-legend"><strong>Legacy</strong> means this older record has no review status. <strong>Approved</strong> means a reviewer approved it for use. Pending records are waiting for review.</p>
             <div className="record-filter-bar">
-              <label>Document<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{documents.map((item) => <option key={item.document_id} value={item.document_id}>{item.filename || item.document_name} · {item.document_id}</option>)}</select></label>
-              <label>Theme<select value={filters.theme} onChange={(event) => setFilters({ ...filters, theme: event.target.value })}><option value="">All themes</option>{taxonomy.map((entry) => <option key={entry.entity_key} value={entry.entity_key}>{entry.display_name}</option>)}</select></label>
-              <label>Page<input type="number" min="1" value={filters.pdf_page_num} onChange={(event) => setFilters({ ...filters, pdf_page_num: event.target.value })} placeholder="Any" /></label>
-              <label>Location<input value={filters.location} onChange={(event) => setFilters({ ...filters, location: event.target.value })} placeholder="District, taluk, town…" /></label>
-              <label>Content type<select value={filters.content_type} onChange={(event) => setFilters({ ...filters, content_type: event.target.value })}><option value="">All types</option>{['narrative_text', 'table', 'figure_crop', 'appendix'].map((type) => <option key={type}>{type}</option>)}</select></label>
-              <label>Entity type<input value={filters.entity_type} onChange={(event) => setFilters({ ...filters, entity_type: event.target.value })} placeholder="Any" /></label>
-              <label>Review status<select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>{['all', 'pending_review', 'approved', 'edited_and_approved'].map((status) => <option key={status} value={status}>{status === 'all' ? 'All records' : status.replaceAll('_', ' ')}</option>)}</select></label>
+              <label>Document<select value={selectedId} onChange={(event) => selectDocument(event.target.value)}>{documents.map((item) => <option key={item.document_id} value={item.document_id}>{item.filename || item.document_name} · {item.document_id}</option>)}</select></label>
+              <label>Theme<select value={filters.theme} onChange={(event) => changeFilters({ ...filters, theme: event.target.value })}><option value="">All themes</option>{taxonomy.map((entry) => <option key={entry.entity_key} value={entry.entity_key}>{entry.display_name}</option>)}</select></label>
+              <label>Page<input type="number" min="1" value={filters.pdf_page_num} onChange={(event) => changeFilters({ ...filters, pdf_page_num: event.target.value })} placeholder="Any" /></label>
+              <label>Location<input value={filters.location} onChange={(event) => changeFilters({ ...filters, location: event.target.value })} placeholder="District, taluk, town…" /></label>
+              <label>Content type<select value={filters.content_type} onChange={(event) => changeFilters({ ...filters, content_type: event.target.value })}><option value="">All types</option>{['narrative_text', 'table', 'figure_crop', 'appendix'].map((type) => <option key={type}>{type}</option>)}</select></label>
+              <label>Entity type<input value={filters.entity_type} onChange={(event) => changeFilters({ ...filters, entity_type: event.target.value })} placeholder="Any" /></label>
+              <label>Review status<select value={filters.status} onChange={(event) => changeFilters({ ...filters, status: event.target.value })}>{['all', 'pending_review', 'approved', 'edited_and_approved'].map((status) => <option key={status} value={status}>{status === 'all' ? 'All records' : status.replaceAll('_', ' ')}</option>)}</select></label>
               <button className="process-button" onClick={() => setAdding(true)} disabled={!selectedId}>＋ Add record</button>
             </div>
             {adding && <form className="record-add-form" onSubmit={addRecord}>
@@ -296,8 +339,8 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
               <label>Period<input value={newRecord.temporal_period} onChange={(event) => setNewRecord({ ...newRecord, temporal_period: event.target.value })} /></label>
               <div><button className="process-button" disabled={busy}>Save record</button><button type="button" className="clear-btn" onClick={() => setAdding(false)}>Cancel</button></div>
             </form>}
-            {records.length === 0 ? <div className="database-empty">No records match the selected filters.</div> : <>
-              <div className="records-table-tools"><span>Drag a column edge to resize it · Arrow keys also work</span><button type="button" className="clear-btn" onClick={resetColumnWidths}>Reset column widths</button></div>
+            {recordsLoading && records.length === 0 ? <div className="database-empty">Loading extracted records…</div> : records.length === 0 ? <div className="database-empty">{error ? 'Records could not be loaded. Check the error above and refresh to retry.' : 'No records match the selected filters.'}</div> : <>
+              <div className="records-table-tools"><span>Drag a column edge to resize it · Arrow keys also work · Sort applies to this page</span><button type="button" className="clear-btn" onClick={resetColumnWidths}>Reset column widths</button></div>
               <div className="records-top-scroll" ref={topScrollRef} onScroll={syncTopScroll} aria-label="Scroll table horizontally">
                 <div style={{ width: `${tableContentWidth}px` }} />
               </div>
@@ -320,11 +363,23 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
                 <td className="record-actions">{editingId === record.theme_entity_id ? <><button onClick={() => saveRecordEdit(record)} disabled={busy}>Save</button><button onClick={() => { setEditingId(''); setDraft({}); }}>Cancel</button></> : <><button onClick={() => { setEditingId(record.theme_entity_id); setDraft({}); }}>Edit</button><button className="entity-delete" onClick={() => removeRecord(record)} disabled={busy}>Delete</button></>}</td>
               </tr>)}
             </tbody></table></div>
+            <div className="records-pagination">
+              <span>{records.length} records on this page</span>
+              <div>
+                <button type="button" className="clear-btn" onClick={() => setPageIndex((current) => Math.max(0, current - 1))} disabled={recordsLoading || pageIndex === 0}>← Previous</button>
+                <span>Page {pageIndex + 1}</span>
+                <button type="button" className="clear-btn" onClick={() => {
+                  if (!nextPageToken) return;
+                  setPageCursors((current) => [...current.slice(0, pageIndex + 1), nextPageToken]);
+                  setPageIndex((current) => current + 1);
+                }} disabled={recordsLoading || !nextPageToken}>Next →</button>
+              </div>
+            </div>
             </>}
           </>}
         </div>
       </div>
-      {review && <ExtractionReviewModal documentId={selectedId} records={review} taxonomy={taxonomy} onClose={() => setReview(null)} onChanged={async () => { setRecords(await fetchDocumentRecords(selectedId, filters)); await loadDocuments(); }} />}
+      {review && <ExtractionReviewModal documentId={selectedId} records={review} taxonomy={taxonomy} onClose={() => setReview(null)} onChanged={async () => { await reloadRecords(); await loadDocuments(); }} />}
     </section>
   );
 }

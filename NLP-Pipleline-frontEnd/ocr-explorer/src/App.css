@@ -308,6 +308,8 @@ footer span { margin: 0 8px; color: #d46a46; }
 .record-filter-bar input, .record-filter-bar select, .record-add-form input, .record-add-form select, .record-add-form textarea { min-width: 0; width: 100%; padding: 8px; border: 1px solid #d9e1d8; border-radius: 6px; color: #26372f; background: white; font: 10px 'DM Mono', monospace; }
 .record-review-legend { margin: 0 0 10px; padding: 9px 11px; border: 1px solid #e5e9e2; border-radius: 7px; background: #f8faf6; color: #718078; font: 10px/1.5 'DM Mono', monospace; }
 .records-table-tools { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 5px; color: #78867e; font: 9px 'DM Mono', monospace; }
+.records-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 2px; color: #78867e; font: 10px 'DM Mono', monospace; }
+.records-pagination > div { display: flex; align-items: center; gap: 9px; }
 .records-top-scroll { width: 100%; height: 19px; margin: 0 0 5px; overflow-x: auto; overflow-y: hidden; border: 1px solid #d9e1d8; border-radius: 7px; background: #f1f5ef; }
 .records-top-scroll > div { height: 1px; }
 .records-top-scroll::-webkit-scrollbar, .records-table-wrap::-webkit-scrollbar { height: 12px; }
