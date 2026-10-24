@@ -5,37 +5,32 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-from decimal import Decimal
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
+from ai_extractor import extract_chunk, page_chunks
 
 LOGGER = logging.getLogger(__name__)
 
 OCR_TABLE_NAME = "jrf-task-ocr-DocumentOCR"
 ENTITIES_TABLE_NAME = "jrf-task-data-Extraction-entities"
+TAXONOMY_TABLE_NAME = "jrf-task-data-EntityTaxonomy"
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
+MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "1500"))
 OCR_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("DYNAMO_TABLE", OCR_TABLE_NAME)
 )
 ENTITIES_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("ENTITIES_TABLE", ENTITIES_TABLE_NAME)
 )
-
-THEME_KEYWORDS = {
-    "Climate_Heat": ("temperature", "heat", "rainfall", "drought", "monsoon", "famine"),
-    "Public_Health_Sanitation": (
-        "disease", "cholera", "plague", "wells contamination", "sewage",
-        "excrement", "sanitation", "epidemic", "health",
-    ),
-    "Land_Use": ("land use", "forest", "tenure", "land", "boundary"),
-    "Agriculture": ("crop", "agriculture", "cultivation", "harvest", "agricultural"),
-    "Irrigation": ("irrigation", "canal", "tank", "water supply"),
-    "Structural_Inequality": ("caste", "inequality", "labour", "wages", "poverty"),
-    "Policies": ("policy", "regulation", "government", "administration", "district", "taluk", "village"),
-}
-LOCATION_RE = re.compile(r"\b([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)?)\s+(district|taluk|village)\b", re.I)
+TAXONOMY_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
+    os.environ.get("TAXONOMY_TABLE", TAXONOMY_TABLE_NAME)
+)
+s3 = boto3.client("s3", region_name=AWS_REGION)
+bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 
 
 def _ddb_safe(value):
@@ -64,6 +59,11 @@ def _put_entity(document_id, theme, entity_id, attributes):
         "theme": theme,
         **attributes,
     }
+    district = (attributes.get("spatial_units") or {}).get("district")
+    if district:
+        item["district"] = district
+    else:
+        item.pop("district", None)
     ENTITIES_TABLE.put_item(Item=_ddb_safe(item))
 
 
@@ -85,67 +85,84 @@ def _caption_for(figure, elements):
     return min(candidates, default=(0, ""), key=lambda candidate: candidate[0])[1]
 
 
-def build_entities(document_id, ocr):
-    """Yield stable table, figure and keyword-matched passage records."""
+def _load_taxonomy():
+    items, kwargs = [], {}
+    while True:
+        response = TAXONOMY_TABLE.scan(**kwargs)
+        items.extend(response.get("Items", []))
+        if "LastEvaluatedKey" not in response:
+            break
+        kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+    return sorted(items, key=lambda item: item.get("entity_key", ""))
+
+
+def build_entities(document_id, ocr, taxonomy, bedrock_client=None):
+    """Yield structured assets and validated Nova Lite facts for review."""
     elements = ocr.get("elements", [])
+    bedrock_client = bedrock_client or bedrock
     for index, table in enumerate(ocr.get("tables", []), start=1):
         page = int(table.get("page", 1))
-        yield "Tables", f"P{page:02d}_T{index:03d}", {
+        yield "TABLES", f"P{page:02d}_T{index:03d}", {
             "pdf_page_num": page,
             "original_page_num": page,
             "entity_type": "table",
             "content_type": "table",
             "table_data": table.get("rows", []),
             "bbox": _bbox(table.get("bbox")),
+            "source_text_chunk": " | ".join(
+                " ".join(str(cell) for cell in row if cell)
+                for row in table.get("rows", [])
+            ),
+            "spatial_units": {},
+            "temporal_period": "",
+            "confidence_score": Decimal("1"),
+            "review_status": "pending_review",
             "custom_attributes": {},
         }
 
     for index, figure in enumerate(ocr.get("figures", []), start=1):
         page = int(figure.get("page", 1))
-        yield "Figures", f"P{page:02d}_F{index:03d}", {
+        yield "FIGURES", f"P{page:02d}_F{index:03d}", {
             "pdf_page_num": page,
             "original_page_num": page,
             "entity_type": "figure",
             "content_type": "figure_crop",
-            "extracted_text": _caption_for(figure, elements),
+            "extracted_fact": _caption_for(figure, elements),
+            "source_text_chunk": _caption_for(figure, elements),
             "s3_crop_url": figure.get("image_s3_key", ""),
             "bbox": _bbox(figure.get("bbox")),
             "crop_status": figure.get("crop_status", "pending"),
+            "spatial_units": {},
+            "temporal_period": "",
+            "confidence_score": Decimal("1"),
+            "review_status": "pending_review",
             "custom_attributes": {},
         }
 
-    for index, element in enumerate(elements, start=1):
-        text = element.get("text", "")
-        lowered = text.casefold()
-        for theme, keywords in THEME_KEYWORDS.items():
-            hits = [keyword for keyword in keywords if keyword in lowered]
-            if not hits:
-                continue
-            page = int(element.get("page", 1))
-            locations = LOCATION_RE.findall(text)
-            spatial_units = [f"{name} {kind.title()}" for name, kind in locations]
-            districts = [name for name, kind in locations if kind.lower() == "district"]
-            attributes = {
-                "pdf_page_num": page,
-                "original_page_num": page,
-                "entity_type": "thematic_passage",
+    for chunk in page_chunks(elements, MAX_CHUNK_CHARS):
+        extracted = extract_chunk(chunk, taxonomy, bedrock_client, MODEL_ID)
+        for fact_index, fact in enumerate(extracted, start=1):
+            entity_id = (
+                f"P{chunk['page']:02d}_C{chunk['chunk_index']:03d}_F{fact_index:02d}"
+            )
+            yield fact["theme"], entity_id, {
+                "pdf_page_num": chunk["page"],
+                "original_page_num": chunk["page"],
+                "entity_type": "thematic_fact",
                 "content_type": "narrative_text",
-                "extracted_text": text,
-                "matched_keywords": hits,
-                "spatial_units": spatial_units,
-                "temporal_period": "",
-                "bbox": _bbox(element.get("bbox")),
-                "confidence": _ddb_safe(element.get("confidence")),
+                "extracted_fact": fact["extracted_fact"],
+                "source_text_chunk": chunk["text"],
+                "spatial_units": fact["spatial_units"],
+                "temporal_period": fact["temporal_period"],
+                "bbox": _bbox(chunk.get("bbox")),
+                "confidence_score": _ddb_safe(fact["confidence_score"]),
+                "review_status": "pending_review",
                 "custom_attributes": {},
             }
-            if districts:
-                attributes["district"] = districts[0]
-            yield theme, f"P{page:02d}_{index:04d}", attributes
 
 
 def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
-    """Load OCR JSON from S3, upsert metadata, then write extracted entities."""
-    s3 = boto3.client("s3", region_name=AWS_REGION)
+    """Load OCR JSON, run Nova Lite over page chunks, and stage records for review."""
     payload = s3.get_object(Bucket=s3_bucket, Key=ocr_s3_key)["Body"].read()
     ocr = json.loads(payload)
     filename = ocr.get("filename", "")
@@ -181,21 +198,17 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
                 or existing_metadata.get("uploaded_at")
                 or datetime.now(timezone.utc).isoformat()
             ),
-            ":status": "processing_entities",
+            ":status": "processing",
         },
     )
-    written = 0
     try:
-        for theme, entity_id, attributes in build_entities(document_id, ocr):
+        taxonomy = _load_taxonomy()
+        staged_records = list(build_entities(document_id, ocr, taxonomy))
+        for theme, entity_id, attributes in staged_records:
             crop_key = attributes.get("s3_crop_url")
             if crop_key:
                 attributes["s3_crop_url"] = f"s3://{s3_bucket}/{crop_key}"
-            entity_district = attributes.pop("district", None)
-            record = {"filename": filename, **attributes}
-            if entity_district:
-                record["district"] = entity_district
-            _put_entity(document_id, theme, entity_id, record)
-            written += 1
+            _put_entity(document_id, theme, entity_id, {"filename": filename, **attributes})
     except Exception:
         OCR_TABLE.update_item(
             Key={"document_id": document_id},
@@ -203,12 +216,26 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
             ExpressionAttributeValues={":status": "failed"},
         )
         raise
+    written = len(staged_records)
+    ingestion_status = "pending_review" if written else "completed"
     OCR_TABLE.update_item(
         Key={"document_id": document_id},
-        UpdateExpression="SET ingestion_status = :status, extracted_entity_count = :count",
-        ExpressionAttributeValues={":status": "completed", ":count": written},
+        UpdateExpression=(
+            "SET ingestion_status = :status, extracted_entity_count = :count, "
+            "pending_review_count = :pending_count"
+        ),
+        ExpressionAttributeValues={
+            ":status": ingestion_status,
+            ":count": written,
+            ":pending_count": written,
+        },
     )
-    return {"document_id": document_id, **counts, "extracted_entity_count": written}
+    return {
+        "document_id": document_id,
+        **counts,
+        "extracted_entity_count": written,
+        "ingestion_status": ingestion_status,
+    }
 
 
 def _response(status_code, payload):
@@ -225,7 +252,28 @@ def _response(status_code, payload):
 
 
 def lambda_handler(event, context):
-    """API Gateway entry point for POST /api/documents/ingest-dynamo."""
+    """API Gateway starter and asynchronous worker for OCR entity extraction."""
+    if event.get("async_worker"):
+        document_id = event.get("document_id", "")
+        try:
+            item = OCR_TABLE.get_item(Key={"document_id": document_id}).get("Item")
+            if not item or item.get("status") != "completed" or not item.get("ocr_s3_key"):
+                raise ValueError("OCR processing is not complete")
+            ingest_document(
+                document_id,
+                item["s3_bucket"],
+                item["ocr_s3_key"],
+                item.get("s3_ocr_json_url"),
+            )
+        except Exception:
+            LOGGER.exception("Asynchronous ingestion failed for %s", document_id)
+            OCR_TABLE.update_item(
+                Key={"document_id": document_id},
+                UpdateExpression="SET ingestion_status = :status",
+                ExpressionAttributeValues={":status": "failed"},
+            )
+        return
+
     method = (event.get("requestContext") or {}).get("http", {}).get("method", "").upper()
     if method == "OPTIONS":
         return _response(200, {})
@@ -243,13 +291,32 @@ def lambda_handler(event, context):
             return _response(404, {"detail": "Document not found"})
         if item.get("status") != "completed" or not item.get("ocr_s3_key"):
             return _response(409, {"detail": "OCR processing is not complete"})
-        result = ingest_document(
-            document_id,
-            item["s3_bucket"],
-            item["ocr_s3_key"],
-            item.get("s3_ocr_json_url"),
+        if item.get("ingestion_status") == "processing":
+            return _response(409, {"detail": "Entity extraction is already running"})
+        OCR_TABLE.update_item(
+            Key={"document_id": document_id},
+            UpdateExpression="SET ingestion_status = :status",
+            ConditionExpression="attribute_not_exists(ingestion_status) OR ingestion_status <> :status",
+            ExpressionAttributeValues={":status": "processing"},
         )
-        return _response(200, result)
+        try:
+            lambda_client.invoke(
+                FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+                InvocationType="Event",
+                Payload=json.dumps({"async_worker": True, "document_id": document_id}).encode("utf-8"),
+            )
+        except Exception:
+            OCR_TABLE.update_item(
+                Key={"document_id": document_id},
+                UpdateExpression="SET ingestion_status = :status",
+                ExpressionAttributeValues={":status": "failed"},
+            )
+            raise
+        return _response(202, {
+            "document_id": document_id,
+            "ingestion_status": "processing",
+            "detail": "Entity extraction started",
+        })
     except Exception:
         LOGGER.exception("DynamoDB ingestion failed")
         return _response(500, {"detail": "DynamoDB ingestion failed"})

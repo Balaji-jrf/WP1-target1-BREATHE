@@ -202,6 +202,47 @@ export async function fetchExtractions(document_id, filters = {}) {
   return data.extractions || [];
 }
 
+export async function fetchTaxonomy() {
+  const res = await fetch(`${API_URL}/api/database/taxonomy`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Failed to load entity taxonomy.');
+  return data.taxonomy || [];
+}
+
+export async function saveTaxonomy(entry) {
+  const res = await fetch(`${API_URL}/api/database/taxonomy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(entry),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not save taxonomy entry.');
+  return data.taxonomy;
+}
+
+export async function deleteTaxonomy(entity_key) {
+  const res = await fetch(`${API_URL}/api/database/taxonomy/${encodeURIComponent(entity_key)}`, {
+    method: 'DELETE',
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not delete taxonomy entry.');
+  return data;
+}
+
+export async function updateExtraction(document_id, theme_entity_id, attributes) {
+  const res = await fetch(
+    `${API_URL}/api/database/extraction/${encodeURIComponent(document_id)}/${encodeURIComponent(theme_entity_id)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ attributes }),
+    },
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not update extraction.');
+  return data.extraction;
+}
+
 export async function ingestDocumentToDatabase(document_id) {
   const res = await fetch(`${API_URL}/api/documents/ingest-dynamo`, {
     method: 'POST',
@@ -225,12 +266,29 @@ export async function saveExtraction(document_id, extraction, action = 'upsert')
 }
 
 export async function deleteExtraction(document_id, theme_entity_id) {
-  const res = await fetch(`${API_URL}/api/database/extractions/${encodeURIComponent(document_id)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'delete', theme_entity_id }),
-  });
+  const res = await fetch(
+    `${API_URL}/api/database/extraction/${encodeURIComponent(document_id)}/${encodeURIComponent(theme_entity_id)}`,
+    { method: 'DELETE' },
+  );
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Could not delete extraction.');
   return data;
+}
+
+export async function approveExtractions(document_id, approved_entity_ids) {
+  const res = await fetch(`${API_URL}/api/database/approve-extractions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document_id, approved_entity_ids }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not approve extractions.');
+  return data;
+}
+
+export async function fetchIngestionStatus(document_id) {
+  const res = await fetch(`${API_URL}/document/${encodeURIComponent(document_id)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not check ingestion status.');
+  return data.ingestion_status;
 }

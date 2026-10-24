@@ -279,6 +279,30 @@ footer span { margin: 0 8px; color: #d46a46; }
 .entity-form textarea { resize: vertical; }
 .entity-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .entity-form-actions .process-button { padding: 10px 14px; font-size: 9px; }
+.extraction-review { max-width: 1000px; }
+.extraction-review-body { padding: 18px 22px; }
+.extraction-review-body > .message { margin-bottom: 14px; }
+.extraction-review .modal-header p { margin: 5px 0 0; color: #87928b; font: 10px 'DM Mono', monospace; }
+.review-theme-group { margin: 0 0 20px; }
+.review-theme-group h3 { color: #183a30; font: 500 16px 'Fraunces', serif; }
+.review-extraction { padding: 14px; margin: 10px 0; border: 1px solid #e1e6df; border-radius: 10px; background: #fff; }
+.review-select { display: flex; align-items: center; gap: 8px; color: #718078; font: 10px 'DM Mono', monospace; }
+.review-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.review-fields label { display: grid; gap: 5px; color: #718078; font: 9px 'DM Mono', monospace; text-transform: uppercase; }
+.review-fields label:nth-child(2) { grid-column: 1 / -1; }
+.review-fields input, .review-fields select, .review-fields textarea { width: 100%; padding: 9px; border: 1px solid #d9e1d8; border-radius: 6px; color: #26372f; font: 11px/1.45 'DM Mono', monospace; }
+.review-extraction details { margin: 8px 0; color: #718078; font: 10px 'DM Mono', monospace; }
+.review-extraction details p { white-space: pre-wrap; color: #31463a; font: 12px/1.5 'Fraunces', serif; }
+.extraction-review-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px; border-top: 1px solid #d9e1d8; }
+.taxonomy-manager { margin-top: 22px; padding: 0 16px 16px; border: 1px solid #d9e1d8; border-radius: 13px; background: #fffefa; }
+.taxonomy-form { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; padding: 14px 0; }
+.taxonomy-form input { min-width: 0; padding: 9px; border: 1px solid #d9e1d8; border-radius: 7px; font: 11px 'DM Mono', monospace; }
+.taxonomy-list { display: grid; gap: 8px; }
+.taxonomy-list article { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; padding: 11px; border: 1px solid #e5e9e2; border-radius: 8px; }
+.taxonomy-list article code, .taxonomy-list article span { color: #87928b; font: 9px 'DM Mono', monospace; }
+.taxonomy-list article span { grid-column: 1; }
+.taxonomy-list article button { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+@media (max-width: 620px) { .review-fields, .taxonomy-form { grid-template-columns: 1fr; } .review-fields label:nth-child(2) { grid-column: auto; } }
 .entity-list { padding: 0 14px 14px; }
 .entity-row { margin-bottom: 9px; }
 .entity-row-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }

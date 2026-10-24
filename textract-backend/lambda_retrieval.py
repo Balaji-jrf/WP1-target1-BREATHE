@@ -15,8 +15,10 @@ import logging
 import os
 import re
 from decimal import Decimal
+from datetime import datetime, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 from botocore.config import Config
 from boto3.dynamodb.conditions import Key
 
@@ -26,6 +28,9 @@ LOGGER.setLevel(logging.INFO)
 DYNAMO_TABLE = os.environ.get("DYNAMO_TABLE", "jrf-task-ocr-DocumentOCR")
 ENTITIES_TABLE_NAME = os.environ.get(
     "ENTITIES_TABLE", "jrf-task-data-Extraction-entities"
+)
+TAXONOMY_TABLE_NAME = os.environ.get(
+    "TAXONOMY_TABLE", "jrf-task-data-EntityTaxonomy"
 )
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 
@@ -41,6 +46,7 @@ CONTENT_TYPES = {
 dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
 table  = dynamo.Table(DYNAMO_TABLE)
 entities_table = dynamo.Table(ENTITIES_TABLE_NAME)
+taxonomy_table = dynamo.Table(TAXONOMY_TABLE_NAME)
 s3 = boto3.client(
     "s3",
     region_name=AWS_REGION,
@@ -52,7 +58,7 @@ s3 = boto3.client(
 def _cors_headers() -> dict:
     return {
         "Access-Control-Allow-Origin":  os.environ.get("ALLOWED_ORIGIN", "*"),
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
         "Access-Control-Allow-Headers": "content-type",
     }
 
@@ -157,9 +163,153 @@ def _get_extractions(document_id: str, params: dict) -> dict:
     for field in ("theme", "district", "content_type"):
         wanted = (params.get(field) or "").strip()
         if wanted:
-            items = [item for item in items if str(item.get(field, "")).casefold() == wanted.casefold()]
+            items = [
+                item for item in items
+                if str(
+                    item.get(field)
+                    or (item.get("spatial_units") or {}).get(field, "")
+                ).casefold() == wanted.casefold()
+            ]
+    status = (params.get("status") or "approved").strip().casefold()
+    if status != "all":
+        items = [
+            item for item in items
+            if str(item.get("review_status", "")).casefold() == status
+        ]
     items.sort(key=lambda item: item.get("theme_entity_id", ""))
     return {"document_id": document_id, "count": len(items), "extractions": items}
+
+
+def _list_taxonomy():
+    items, kwargs = [], {}
+    while True:
+        response = taxonomy_table.scan(**kwargs)
+        items.extend(response.get("Items", []))
+        if "LastEvaluatedKey" not in response:
+            break
+        kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+    items.sort(key=lambda item: item.get("entity_key", ""))
+    return {"count": len(items), "taxonomy": items}
+
+
+def _save_taxonomy(body):
+    entity_key = (body.get("entity_key") or "").strip().upper()
+    display_name = (body.get("display_name") or "").strip()
+    description = (body.get("description") or "").strip()
+    keywords = body.get("keywords") or []
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", entity_key):
+        return 400, {"detail": "entity_key must use 2-64 uppercase letters, numbers, or underscores"}
+    if not display_name or not description:
+        return 400, {"detail": "display_name and description are required"}
+    if not isinstance(keywords, list) or any(not isinstance(word, str) for word in keywords):
+        return 400, {"detail": "keywords must be a list of strings"}
+    item = {
+        "entity_key": entity_key,
+        "display_name": display_name,
+        "description": description,
+        "keywords": [word.strip() for word in keywords if word.strip()],
+        "extraction_guidance": (body.get("extraction_guidance") or "").strip(),
+        "is_active": bool(body.get("is_active", True)),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    taxonomy_table.put_item(Item=item)
+    return 200, {"saved": True, "taxonomy": item}
+
+
+def _delete_taxonomy(entity_key):
+    entity_key = entity_key.strip().upper()
+    if not entity_key:
+        return 400, {"detail": "entity_key is required"}
+    taxonomy_table.delete_item(Key={"entity_key": entity_key})
+    return 200, {"deleted": True, "entity_key": entity_key}
+
+
+def _update_extraction(document_id, theme_entity_id, body):
+    key = {"id": f"DOC#{document_id}", "theme_entity_id": theme_entity_id}
+    current = entities_table.get_item(Key=key).get("Item")
+    if not current:
+        return 404, {"detail": "Extraction not found"}
+    attributes = body.get("attributes", body)
+    if not isinstance(attributes, dict):
+        return 400, {"detail": "attributes must be a JSON object"}
+    allowed = {
+        "theme", "entity_type", "content_type", "extracted_fact", "spatial_units",
+        "temporal_period", "confidence_score", "source_text_chunk", "bbox",
+        "custom_attributes",
+    }
+    updates = {name: value for name, value in attributes.items() if name in allowed}
+    if not updates:
+        return 400, {"detail": "No editable extraction fields were provided"}
+    updated = {**current, **_ddb_safe(updates)}
+    if "spatial_units" in updates:
+        district = (updates.get("spatial_units") or {}).get("district")
+        if district:
+            updated["district"] = district
+        else:
+            updated.pop("district", None)
+    entities_table.put_item(Item=updated)
+    return 200, {"saved": True, "extraction": updated}
+
+
+def _delete_extraction(document_id, theme_entity_id):
+    key = {"id": f"DOC#{document_id}", "theme_entity_id": theme_entity_id}
+    result = entities_table.delete_item(Key=key, ReturnValues="ALL_OLD")
+    if not result.get("Attributes"):
+        return 404, {"detail": "Extraction not found"}
+    remaining = _get_extractions(document_id, {"status": "pending_review"})["count"]
+    table.update_item(
+        Key={"document_id": document_id},
+        UpdateExpression="SET ingestion_status = :status, pending_review_count = :remaining",
+        ExpressionAttributeValues={
+            ":status": "pending_review" if remaining else "completed",
+            ":remaining": remaining,
+        },
+    )
+    return 200, {"deleted": True, "theme_entity_id": theme_entity_id}
+
+
+def _approve_extractions(body):
+    document_id = (body.get("document_id") or "").strip()
+    entity_ids = body.get("approved_entity_ids")
+    if not document_id or not isinstance(entity_ids, list) or not entity_ids:
+        return 400, {"detail": "document_id and a non-empty approved_entity_ids list are required"}
+    approved_at = datetime.now(timezone.utc).isoformat()
+    approved = 0
+    for entity_id in dict.fromkeys(str(value).strip() for value in entity_ids if str(value).strip()):
+        try:
+            result = entities_table.update_item(
+                Key={"id": f"DOC#{document_id}", "theme_entity_id": entity_id},
+                UpdateExpression="SET review_status = :status, approved_at = :approved_at",
+                ConditionExpression="review_status = :pending",
+                ExpressionAttributeValues={
+                    ":status": "approved",
+                    ":pending": "pending_review",
+                    ":approved_at": approved_at,
+                },
+                ReturnValues="UPDATED_NEW",
+            )
+            approved += 1 if result.get("Attributes") else 0
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+    remaining = _get_extractions(document_id, {"status": "pending_review"})["count"]
+    document_status = "pending_review" if remaining else "completed"
+    table.update_item(
+        Key={"document_id": document_id},
+        UpdateExpression=(
+            "SET ingestion_status = :status, pending_review_count = :remaining"
+        ),
+        ExpressionAttributeValues={
+            ":status": document_status,
+            ":remaining": remaining,
+        },
+    )
+    return 200, {
+        "document_id": document_id,
+        "approved_count": approved,
+        "pending_review_count": remaining,
+        "ingestion_status": document_status,
+    }
 
 
 def _parse_body(event):
@@ -187,8 +337,7 @@ def _mutate_extraction(document_id, body):
         return 400, {"detail": "theme_entity_id is required"}
     key = {"id": f"DOC#{document_id}", "theme_entity_id": theme_entity_id}
     if action == "delete":
-        entities_table.delete_item(Key=key)
-        return 200, {"deleted": True, "theme_entity_id": theme_entity_id}
+        return _delete_extraction(document_id, theme_entity_id)
     if action not in {"create", "update", "upsert"}:
         return 400, {"detail": "action must be create, update, upsert, or delete"}
     attributes = body.get("attributes") or {}
@@ -200,6 +349,13 @@ def _mutate_extraction(document_id, body):
         "theme": str(body.get("theme") or attributes.get("theme") or "Custom"),
         **attributes,
     }
+    item.setdefault("review_status", "pending_review")
+    item.setdefault("content_type", "narrative_text")
+    district = (item.get("spatial_units") or {}).get("district")
+    if district:
+        item["district"] = district
+    else:
+        item.pop("district", None)
     item["id"] = key["id"]
     item["theme_entity_id"] = theme_entity_id
     item["document_id"] = document_id
@@ -243,6 +399,58 @@ def handler(event: dict, context) -> dict:
         return _response(200, {})
 
     LOGGER.info("method=%s path=%s", method, raw_path)
+
+    if raw_path.rstrip("/").endswith("/api/database/taxonomy"):
+        if method == "GET":
+            try:
+                return _response(200, _list_taxonomy())
+            except Exception:
+                LOGGER.exception("Failed to list entity taxonomy")
+                return _response(500, {"detail": "Failed to list entity taxonomy"})
+        if method == "POST":
+            try:
+                status, body = _save_taxonomy(_parse_body(event))
+                return _response(status, body)
+            except Exception:
+                LOGGER.exception("Failed to save entity taxonomy")
+                return _response(500, {"detail": "Failed to save entity taxonomy"})
+
+    taxonomy_match = re.search(r"/api/database/taxonomy/([^/]+)/?$", raw_path)
+    if taxonomy_match and method == "DELETE":
+        try:
+            entity_key = path_params.get("entity_key") or taxonomy_match.group(1)
+            status, body = _delete_taxonomy(entity_key)
+            return _response(status, body)
+        except Exception:
+            LOGGER.exception("Failed to delete taxonomy entry")
+            return _response(500, {"detail": "Failed to delete taxonomy entry"})
+
+    if raw_path.rstrip("/").endswith(("/api/documents/approve-extractions", "/api/database/approve-extractions")) and method == "POST":
+        try:
+            status, body = _approve_extractions(_parse_body(event))
+            return _response(status, body)
+        except Exception:
+            LOGGER.exception("Failed to approve document extractions")
+            return _response(500, {"detail": "Failed to approve extractions"})
+
+    singular_match = re.search(
+        r"/api/database/extraction/([^/]+)/([^/]+)/?$", raw_path
+    )
+    if singular_match:
+        document_id = path_params.get("document_id") or singular_match.group(1)
+        theme_entity_id = path_params.get("theme_entity_id") or singular_match.group(2)
+        try:
+            if method == "PUT":
+                status, body = _update_extraction(
+                    document_id, theme_entity_id, _parse_body(event)
+                )
+                return _response(status, body)
+            if method == "DELETE":
+                status, body = _delete_extraction(document_id, theme_entity_id)
+                return _response(status, body)
+        except Exception:
+            LOGGER.exception("Failed to mutate extraction %s", theme_entity_id)
+            return _response(500, {"detail": "Failed to update extraction"})
 
     extraction_match = re.search(r"/api/database/extractions/([^/]+)/?$", raw_path)
     if extraction_match:

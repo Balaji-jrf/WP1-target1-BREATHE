@@ -174,6 +174,12 @@ code alone does not create API Gateway routes.
 | `GET` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — optional `theme`, `district`, `content_type` filters |
 | `POST` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — create/update/delete an entity (`action`, `theme_entity_id`, `attributes`) |
 | `POST` | `/api/database/custom-attribute` | `jrf-task-ocr-retrieval` — body: `document_id`, `theme_entity_id`, `key`, `value` |
+| `PUT` | `/api/database/extraction/{document_id}/{theme_entity_id}` | `jrf-task-ocr-retrieval` — edit staged or approved record fields |
+| `DELETE` | `/api/database/extraction/{document_id}/{theme_entity_id}` | `jrf-task-ocr-retrieval` — delete an extraction |
+| `GET` | `/api/database/taxonomy` | `jrf-task-ocr-retrieval` — list the dynamic extraction schema |
+| `POST` | `/api/database/taxonomy` | `jrf-task-ocr-retrieval` — add or update a taxonomy entry |
+| `DELETE` | `/api/database/taxonomy/{entity_key}` | `jrf-task-ocr-retrieval` — remove a taxonomy entry |
+| `POST` | `/api/database/approve-extractions` | `jrf-task-ocr-retrieval` — approve selected staged IDs |
 
 The retrieval Lambda uses `ENTITIES_TABLE=jrf-task-data-Extraction-entities` for the
 entity table. Its role needs `dynamodb:Query`, `dynamodb:GetItem`, `dynamodb:PutItem`,
@@ -184,10 +190,34 @@ ThemeIndex and LocationIndex use `theme` or `district` as the partition key and
 
 Add the routes above to the HTTP API with Lambda proxy integration to
 `jrf-task-dynamo-ingestion` for the ingestion route and `jrf-task-ocr-retrieval`
-for the extraction and custom-attribute routes. API Gateway CORS must allow
-`GET, POST, OPTIONS` and the `content-type` header for the configured frontend
-origins. Package `dynamo_ingestion.py` as `lambda_function.py` in the ingestion
-Lambda because its configured handler is `lambda_function.lambda_handler`.
+for the extraction, review, taxonomy, and custom-attribute routes. API Gateway CORS
+must allow `GET, POST, PUT, DELETE, OPTIONS` and the `content-type` header for the
+configured frontend origins. Package `dynamo_ingestion.py` as `lambda_function.py`
+and include `ai_extractor.py` in the ingestion Lambda package because its configured
+handler is `lambda_function.lambda_handler`.
+
+### Nova Lite review workflow
+
+The ingestion starter asynchronously invokes itself after validating OCR completion.
+It groups OCR lines into page chunks of up to 1,500 characters, loads active entries
+from `jrf-task-data-EntityTaxonomy`, and sends each chunk to Amazon Bedrock model
+`amazon.nova-lite-v1:0` in `ap-southeast-2`. There is no local model fallback. Facts
+with an unknown theme, fewer than five words / 35 characters, or confidence below
+0.55 are discarded. Facts, tables, and figures are written with
+`review_status=pending_review`; the document's `ingestion_status` is set accordingly.
+
+`GET /api/database/extractions/{document_id}` returns approved records by default.
+Use `?status=pending_review` for the review queue or `?status=all` for all records.
+The frontend can edit and delete staged records, add manual facts, and approve chosen
+`theme_entity_id` values. Approval marks them `approved`; the document changes to
+`completed` when no pending records remain. Taxonomy entries are prompt schema, so
+new active themes are used on later ingestion runs without a backend code change.
+
+The ingestion Lambda requires `BEDROCK_MODEL_ID=amazon.nova-lite-v1:0`,
+`TAXONOMY_TABLE=jrf-task-data-EntityTaxonomy`, and permission for
+`bedrock:InvokeModel` on the Nova Lite foundation model. It also needs permission to
+invoke itself asynchronously and a timeout long enough for page-level model calls.
+The retrieval role needs DynamoDB read/write access to the taxonomy table.
 
 Provision or inspect the tables with:
 
