@@ -195,7 +195,7 @@ export async function fetchDocumentRecordsPage(document_id, filters = {}, cursor
   Object.entries(filters).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
-  params.set('limit', '50');
+  params.set('limit', '10');
   if (cursor) params.set('cursor', cursor);
   const suffix = params.size ? `?${params.toString()}` : '';
   const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records${suffix}`);

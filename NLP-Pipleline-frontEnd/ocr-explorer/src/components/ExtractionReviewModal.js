@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { approveDocumentRecords, createDocumentRecord, deleteDocumentRecord, updateDocumentRecord } from '../api';
+import { approveDocumentRecords, createDocumentRecord, deleteDocumentRecord, fetchDocumentRecords, updateDocumentRecord } from '../api';
 
 export default function ExtractionReviewModal({ documentId, records, taxonomy, onClose, onChanged }) {
   const [items, setItems] = useState(records);
@@ -43,8 +43,16 @@ export default function ExtractionReviewModal({ documentId, records, taxonomy, o
     if (!selected.size) { setError('Select at least one extraction to approve.'); return; }
     setBusy(true); setError('');
     try {
-      await approveDocumentRecords(documentId, [...selected]);
-      await onChanged(); onClose();
+      const result = await approveDocumentRecords(documentId, [...selected]);
+      await onChanged();
+      if (result.pending_review_count > 0) {
+        const pending = await fetchDocumentRecords(documentId, { status: 'pending_review' });
+        setItems(pending);
+        setSelected(new Set(pending.map((item) => item.theme_entity_id)));
+        setError(`${result.approved_count} approved. ${result.pending_review_count} records still need review.`);
+        return;
+      }
+      onClose();
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   };

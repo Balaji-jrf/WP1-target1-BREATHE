@@ -230,6 +230,22 @@ def _get_document_records(document_id: str, params: dict) -> dict:
     }
 
 
+def _count_document_records(document_id: str, review_status: str) -> int:
+    count = 0
+    kwargs = {
+        "KeyConditionExpression": Key("id").eq(f"DOC#{document_id}"),
+        "FilterExpression": Attr("review_status").eq(review_status),
+        "Select": "COUNT",
+    }
+    while True:
+        response = records_table.query(**kwargs)
+        count += response.get("Count", 0)
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            return count
+        kwargs["ExclusiveStartKey"] = last_key
+
+
 def _list_taxonomy():
     items, kwargs = [], {}
     while True:
@@ -306,7 +322,7 @@ def _delete_record(document_id, theme_entity_id):
     result = records_table.delete_item(Key=key, ReturnValues="ALL_OLD")
     if not result.get("Attributes"):
         return 404, {"detail": "Record not found"}
-    remaining = _get_document_records(document_id, {"status": "pending_review"})["count"]
+    remaining = _count_document_records(document_id, "pending_review")
     table.update_item(
         Key={"document_id": document_id},
         UpdateExpression="SET ingestion_status = :status, pending_review_count = :remaining",
@@ -342,7 +358,7 @@ def _approve_document_records(document_id, body):
         except ClientError as error:
             if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
-    remaining = _get_document_records(document_id, {"status": "pending_review"})["count"]
+    remaining = _count_document_records(document_id, "pending_review")
     document_status = "pending_review" if remaining else "completed"
     table.update_item(
         Key={"document_id": document_id},
@@ -417,7 +433,7 @@ def _create_record(document_id, body):
             return 409, {"detail": "A record with this theme_entity_id already exists"}
         raise
     if item.get("review_status") == "pending_review":
-        pending = _get_document_records(document_id, {"status": "pending_review"})["count"]
+        pending = _count_document_records(document_id, "pending_review")
         table.update_item(
             Key={"document_id": document_id},
             UpdateExpression="SET ingestion_status = :status, pending_review_count = :count",

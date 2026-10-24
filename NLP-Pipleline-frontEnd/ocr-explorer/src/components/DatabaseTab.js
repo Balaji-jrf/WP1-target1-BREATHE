@@ -308,14 +308,15 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
               <button className="process-button" onClick={ingest} disabled={busy || selected.status !== 'completed' || ['processing', 'pending_review'].includes(selected.ingestion_status)}>
                 {busy ? 'Nova Lite extracting…' : '↻ Ingest OCR data'}
               </button>
-              {selected.ingestion_status === 'pending_review' && <button className="clear-btn" onClick={async () => setReview(await fetchDocumentRecords(selectedId, { status: 'pending_review' }))}>Review pending</button>}
+              {selected.ingestion_status === 'pending_review' && <button className="clear-btn" onClick={async () => setReview(await fetchDocumentRecords(selectedId, { status: 'pending_review' }))}>Review pending ({selected.pending_review_count ?? '…'})</button>}
             </div>
             <div className="database-metadata-grid">
               {[
                   ['Status', selected.status], ['Pages', selected.total_pages],
                 ['Text blocks', selected.text_blocks_count ?? selected.element_count],
                 ['Layout regions', selected.layout_regions_count], ['Tables', selected.table_count],
-                ['Figures', selected.figure_count], ['Ingestion', selected.ingestion_status],
+                  ['Figures', selected.figure_count], ['Ingestion', selected.ingestion_status],
+                ['Pending review', selected.pending_review_count],
                 ['Created', selected.uploaded_at || selected.created_at],
               ].map(([label, value]) => <div key={label}><span>{label}</span><strong>{display(value)}</strong></div>)}
             </div>
