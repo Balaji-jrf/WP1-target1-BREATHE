@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 venv/
 .env
+.venv/
+jrf-task-llm/
 
 # React build output (Amplify builds this itself)
 NLP-Pipleline-frontEnd/ocr-explorer/build/

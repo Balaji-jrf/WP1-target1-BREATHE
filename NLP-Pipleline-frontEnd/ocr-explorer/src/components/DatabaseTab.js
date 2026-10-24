@@ -1,13 +1,29 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createDocumentRecord, deleteDocumentRecord, fetchDocuments, fetchDocumentRecords, fetchIngestionStatus, fetchTaxonomy, ingestDocumentToDatabase, updateDocumentRecord } from '../api';
 import ExtractionReviewModal from './ExtractionReviewModal';
 
 const display = (value) => value == null || value === '' ? '—' : String(value);
+const DEFAULT_RECORD_COLUMN_WIDTHS = [85, 190, 170, 760, 190, 150, 150, 120];
+const RECORD_COLUMN_WIDTHS_KEY = 'breathe-database-record-column-widths';
 
 export default function DatabaseTab({ initialDocumentId = '' }) {
   const [documents, setDocuments] = useState([]);
   const [selectedId, setSelectedId] = useState('');
   const [records, setRecords] = useState([]);
+  const [sort, setSort] = useState({ key: 'pdf_page_num', direction: 'asc' });
+  const [tableContentWidth, setTableContentWidth] = useState(0);
+  const [columnWidths, setColumnWidths] = useState(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(RECORD_COLUMN_WIDTHS_KEY));
+      return Array.isArray(saved) && saved.length === DEFAULT_RECORD_COLUMN_WIDTHS.length
+        ? saved.map((width, index) => Math.max(index === 3 ? 280 : 80, Number(width) || DEFAULT_RECORD_COLUMN_WIDTHS[index]))
+        : DEFAULT_RECORD_COLUMN_WIDTHS;
+    } catch { return DEFAULT_RECORD_COLUMN_WIDTHS; }
+  });
+  const topScrollRef = useRef(null);
+  const tableScrollRef = useRef(null);
+  const tableRef = useRef(null);
+  const resizingColumnRef = useRef(null);
   const [documentSearch, setDocumentSearch] = useState('');
   const [filters, setFilters] = useState({ theme: '', pdf_page_num: '', location: '', content_type: '', entity_type: '', status: 'all' });
   const [editingId, setEditingId] = useState('');
@@ -23,6 +39,95 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
 
   const selected = documents.find((document) => document.document_id === selectedId);
   const visibleDocuments = documents.filter((document) => `${document.filename || document.document_name || ''} ${document.document_id}`.toLowerCase().includes(documentSearch.toLowerCase()));
+  const sortedRecords = useMemo(() => [...records].sort((left, right) => {
+    const a = left[sort.key] ?? (sort.key === 'extracted_fact' ? left.extracted_text : '');
+    const b = right[sort.key] ?? (sort.key === 'extracted_fact' ? right.extracted_text : '');
+    const compare = sort.key === 'pdf_page_num'
+      ? (Number(a) || 0) - (Number(b) || 0)
+      : String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+    return sort.direction === 'asc' ? compare : -compare;
+  }), [records, sort]);
+
+  const updateTableWidth = useCallback(() => {
+    const width = tableRef.current?.scrollWidth || 0;
+    setTableContentWidth((current) => current === width ? current : width);
+  }, []);
+
+  useEffect(() => {
+    const table = tableRef.current;
+    const wrapper = tableScrollRef.current;
+    if (!table || !wrapper) return undefined;
+    updateTableWidth();
+    const observer = new ResizeObserver(updateTableWidth);
+    observer.observe(table);
+    observer.observe(wrapper);
+    window.addEventListener('resize', updateTableWidth);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateTableWidth);
+    };
+  }, [records, editingId, filters, selectedId, columnWidths, updateTableWidth]);
+
+  useEffect(() => {
+    const resize = (event) => {
+      const drag = resizingColumnRef.current;
+      if (!drag) return;
+      const next = Math.max(drag.index === 3 ? 280 : 80, drag.width + event.clientX - drag.startX);
+      setColumnWidths((current) => current.map((width, index) => index === drag.index ? next : width));
+    };
+    const stopResize = () => {
+      if (!resizingColumnRef.current) return;
+      resizingColumnRef.current = null;
+      document.body.classList.remove('is-resizing-record-column');
+    };
+    window.addEventListener('pointermove', resize);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+    return () => {
+      window.removeEventListener('pointermove', resize);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    try { window.localStorage.setItem(RECORD_COLUMN_WIDTHS_KEY, JSON.stringify(columnWidths)); } catch { /* Keep resizing available when storage is disabled. */ }
+  }, [columnWidths]);
+
+  const startColumnResize = (index, event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    resizingColumnRef.current = { index, startX: event.clientX, width: columnWidths[index] };
+    document.body.classList.add('is-resizing-record-column');
+  };
+  const resizeColumnByKeyboard = (index, event) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowRight' ? 20 : -20;
+    setColumnWidths((current) => current.map((width, column) => column === index
+      ? Math.max(column === 3 ? 280 : 80, width + delta)
+      : width));
+  };
+  const resetColumnWidths = () => setColumnWidths(DEFAULT_RECORD_COLUMN_WIDTHS);
+
+  const toggleSort = (key) => setSort((current) => ({
+    key,
+    direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+  }));
+  const sortMark = (key) => sort.key === key ? (sort.direction === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+  const syncHorizontalScroll = (source, target) => {
+    if (!target) return;
+    const sourceRange = source.scrollWidth - source.clientWidth;
+    const targetRange = target.scrollWidth - target.clientWidth;
+    const targetPosition = sourceRange > 0 ? Math.round((source.scrollLeft / sourceRange) * targetRange) : 0;
+    if (target.scrollLeft !== targetPosition) target.scrollLeft = targetPosition;
+  };
+  const syncTopScroll = (event) => {
+    syncHorizontalScroll(event.currentTarget, tableScrollRef.current);
+  };
+  const syncTableScroll = (event) => {
+    syncHorizontalScroll(event.currentTarget, topScrollRef.current);
+  };
 
   const loadDocuments = useCallback(async () => {
     setLoading(true);
@@ -172,6 +277,7 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
               ].map(([label, value]) => <div key={label}><span>{label}</span><strong>{display(value)}</strong></div>)}
             </div>
             <div className="database-record-heading"><h3>Extracted records</h3><span>{records.length} records</span></div>
+            <p className="record-review-legend"><strong>Legacy</strong> means this older record has no review status. <strong>Approved</strong> means a reviewer approved it for use. Pending records are waiting for review.</p>
             <div className="record-filter-bar">
               <label>Document<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{documents.map((item) => <option key={item.document_id} value={item.document_id}>{item.filename || item.document_name} · {item.document_id}</option>)}</select></label>
               <label>Theme<select value={filters.theme} onChange={(event) => setFilters({ ...filters, theme: event.target.value })}><option value="">All themes</option>{taxonomy.map((entry) => <option key={entry.entity_key} value={entry.entity_key}>{entry.display_name}</option>)}</select></label>
@@ -190,18 +296,31 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
               <label>Period<input value={newRecord.temporal_period} onChange={(event) => setNewRecord({ ...newRecord, temporal_period: event.target.value })} /></label>
               <div><button className="process-button" disabled={busy}>Save record</button><button type="button" className="clear-btn" onClick={() => setAdding(false)}>Cancel</button></div>
             </form>}
-            {records.length === 0 ? <div className="database-empty">No records match the selected filters.</div> : <div className="records-table-wrap"><table className="records-table"><thead><tr><th>Page</th><th>Theme</th><th>Type</th><th>Extracted fact / content</th><th>Location</th><th>Period</th><th>Review</th><th>Actions</th></tr></thead><tbody>
-              {records.map((record) => <tr key={record.theme_entity_id}>
+            {records.length === 0 ? <div className="database-empty">No records match the selected filters.</div> : <>
+              <div className="records-table-tools"><span>Drag a column edge to resize it · Arrow keys also work</span><button type="button" className="clear-btn" onClick={resetColumnWidths}>Reset column widths</button></div>
+              <div className="records-top-scroll" ref={topScrollRef} onScroll={syncTopScroll} aria-label="Scroll table horizontally">
+                <div style={{ width: `${tableContentWidth}px` }} />
+              </div>
+              <div className="records-table-wrap" ref={tableScrollRef} onScroll={syncTableScroll}><table ref={tableRef} className="records-table"><colgroup>{columnWidths.map((width, index) => <col key={index} style={{ width: `${width}px` }} />)}</colgroup><thead><tr>
+                {['Page', 'Theme', 'Type', 'Extracted fact / content', 'Location', 'Period', 'Review', 'Actions'].map((label, index) => <th key={label} aria-sort={index === 0 && sort.key === 'pdf_page_num' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : index === 3 && sort.key === 'extracted_fact' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : index === 5 && sort.key === 'temporal_period' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  {index === 0 || index === 3 || index === 5
+                    ? <button className="table-sort" onClick={() => toggleSort(index === 0 ? 'pdf_page_num' : index === 3 ? 'extracted_fact' : 'temporal_period')}>{label}{sortMark(index === 0 ? 'pdf_page_num' : index === 3 ? 'extracted_fact' : 'temporal_period')}</button>
+                    : <span className="table-heading-label">{label}</span>}
+                  {index < 7 && <span className="column-resize-handle" role="separator" aria-orientation="vertical" aria-label={`Resize ${label} column`} tabIndex="0" onPointerDown={(event) => startColumnResize(index, event)} onKeyDown={(event) => resizeColumnByKeyboard(index, event)} />}
+                </th>)}
+              </tr></thead><tbody>
+              {sortedRecords.map((record) => <tr key={record.theme_entity_id}>
                 <td>{editingId === record.theme_entity_id ? <input type="number" value={draft.pdf_page_num ?? record.pdf_page_num ?? ''} onChange={(event) => setDraft({ ...draft, pdf_page_num: event.target.value })} /> : record.pdf_page_num || '—'}</td>
                 <td>{editingId === record.theme_entity_id ? <select value={draft.theme || record.theme} onChange={(event) => setDraft({ ...draft, theme: event.target.value })}>{taxonomy.map((entry) => <option key={entry.entity_key} value={entry.entity_key}>{entry.display_name}</option>)}{!taxonomy.some((entry) => entry.entity_key === record.theme) && <option value={record.theme}>{record.theme}</option>}</select> : record.theme}</td>
                 <td>{record.content_type || record.entity_type || '—'}</td>
                 <td className="record-fact-cell">{editingId === record.theme_entity_id ? <textarea rows="4" value={draft.extracted_fact ?? record.extracted_fact ?? record.extracted_text ?? ''} onChange={(event) => setDraft({ ...draft, extracted_fact: event.target.value })} /> : <><strong>{record.extracted_fact || record.extracted_text || (record.table_data ? `${record.table_data.length} table rows` : record.content_type || 'Structured record')}</strong>{record.table_data && <details><summary>View table data</summary><pre>{JSON.stringify(record.table_data, null, 2)}</pre></details>}{record.source_text_chunk && <details><summary>Source</summary><p>{record.source_text_chunk}</p></details>}{record.s3_crop_url && <a href={record.s3_crop_url} target="_blank" rel="noreferrer">Figure crop</a>}</>}</td>
                 <td>{editingId === record.theme_entity_id ? <input value={draft.district ?? record.spatial_units?.district ?? ''} onChange={(event) => setDraft({ ...draft, district: event.target.value })} /> : Object.values(record.spatial_units || {}).join(', ') || '—'}</td>
                 <td>{editingId === record.theme_entity_id ? <input value={draft.temporal_period ?? record.temporal_period ?? ''} onChange={(event) => setDraft({ ...draft, temporal_period: event.target.value })} /> : record.temporal_period || '—'}</td>
-                <td><span className={`record-status ${record.review_status || 'legacy'}`}>{record.review_status || 'legacy'}</span></td>
+                <td><span className={`record-status ${record.review_status || 'legacy'}`} title={record.review_status === 'approved' ? 'Reviewed and approved for use' : record.review_status === 'pending_review' ? 'Waiting for human review' : 'Older record created before review status was added'}>{record.review_status === 'approved' ? 'Approved' : record.review_status === 'pending_review' ? 'Pending review' : record.review_status === 'edited_and_approved' ? 'Edited & approved' : 'Legacy'}</span></td>
                 <td className="record-actions">{editingId === record.theme_entity_id ? <><button onClick={() => saveRecordEdit(record)} disabled={busy}>Save</button><button onClick={() => { setEditingId(''); setDraft({}); }}>Cancel</button></> : <><button onClick={() => { setEditingId(record.theme_entity_id); setDraft({}); }}>Edit</button><button className="entity-delete" onClick={() => removeRecord(record)} disabled={busy}>Delete</button></>}</td>
               </tr>)}
-            </tbody></table></div>}
+            </tbody></table></div>
+            </>}
           </>}
         </div>
       </div>
