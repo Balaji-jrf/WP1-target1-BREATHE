@@ -170,7 +170,7 @@ Lambda provides `AWS_REGION` automatically. All functions and AWS clients use
 The HTTP API must also be configured with the database routes below; adding handler
 code alone does not create API Gateway routes.
 
-| `POST` | `/api/documents/ingest-dynamo` | `jrf-task-ocr-retrieval` — body: `{"document_id":"..."}` |
+| `POST` | `/api/documents/ingest-dynamo` | `jrf-task-dynamo-ingestion` — body: `{"document_id":"..."}` |
 | `GET` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — optional `theme`, `district`, `content_type` filters |
 | `POST` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — create/update/delete an entity (`action`, `theme_entity_id`, `attributes`) |
 | `POST` | `/api/database/custom-attribute` | `jrf-task-ocr-retrieval` — body: `document_id`, `theme_entity_id`, `key`, `value` |
@@ -183,9 +183,11 @@ ThemeIndex and LocationIndex use `theme` or `district` as the partition key and
 `document_id` as the sort key.
 
 Add the routes above to the HTTP API with Lambda proxy integration to
-`jrf-task-ocr-retrieval`. API Gateway CORS must allow `GET, POST, OPTIONS` and the
-`content-type` header for the configured frontend origins. Deploy both
-`lambda_retrieval.py` and `dynamo_ingestion.py` in the retrieval Lambda package.
+`jrf-task-dynamo-ingestion` for the ingestion route and `jrf-task-ocr-retrieval`
+for the extraction and custom-attribute routes. API Gateway CORS must allow
+`GET, POST, OPTIONS` and the `content-type` header for the configured frontend
+origins. Package `dynamo_ingestion.py` as `lambda_function.py` in the ingestion
+Lambda because its configured handler is `lambda_function.lambda_handler`.
 
 Provision or inspect the tables with:
 
