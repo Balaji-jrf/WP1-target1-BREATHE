@@ -1,6 +1,9 @@
 import io
 import json
 import unittest
+from unittest.mock import patch
+
+from botocore.exceptions import ClientError
 
 from ai_extractor import extract_chunk, page_chunks, validate_entities
 from dynamo_ingestion import build_entities
@@ -18,6 +21,18 @@ class FakeBedrock:
         self.request = kwargs
         body = {"output": {"message": {"content": [{"text": self.text}]}}}
         return {"body": io.BytesIO(json.dumps(body).encode())}
+
+
+class ThrottlingBedrock(FakeBedrock):
+    def __init__(self, text):
+        super().__init__(text)
+        self.calls = 0
+
+    def invoke_model(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, "InvokeModel")
+        return super().invoke_model(**kwargs)
 
 
 class ExtractorTests(unittest.TestCase):
@@ -46,6 +61,14 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(client.request["modelId"], "amazon.nova-lite-v1:0")
         self.assertEqual(client.request["contentType"], "application/json")
+
+    def test_retries_transient_bedrock_throttling(self):
+        client = ThrottlingBedrock('[{"theme":"CLIMATE_METRICS","extracted_fact":"Rainfall records indicate a severe seasonal drought in Bidar district.","confidence_score":0.9}]')
+        with patch("ai_extractor.time.sleep") as sleep:
+            result = extract_chunk({"page": 4, "text": "Source excerpt"}, TAXONOMY, client)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(client.calls, 2)
+        sleep.assert_called_once_with(2)
 
     def test_ingestion_builder_stages_validated_fact_and_table(self):
         client = FakeBedrock('[{"theme":"CLIMATE_METRICS","extracted_fact":"Rainfall records indicate a severe seasonal drought in Bidar district.","confidence_score":0.9,"spatial_units":{"district":"Bidar"},"temporal_period":"1934"}]')

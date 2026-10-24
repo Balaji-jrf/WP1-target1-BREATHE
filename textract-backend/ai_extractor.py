@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import time
+
+from botocore.exceptions import ClientError
 
 MIN_FACT_WORDS = 5
 MIN_FACT_CHARS = 35
@@ -157,7 +160,7 @@ def validate_entities(items, taxonomy):
 
 
 def extract_chunk(chunk, taxonomy, bedrock_client, model_id="amazon.nova-lite-v1:0"):
-    """Call Bedrock InvokeModel once for a chunk and validate the JSON response."""
+    """Invoke Nova Lite with bounded retry for account-level throttling."""
     if not any(item.get("is_active", True) for item in taxonomy):
         raise ValueError("No active entity taxonomy is configured")
     request_body = {
@@ -174,10 +177,18 @@ def extract_chunk(chunk, taxonomy, bedrock_client, model_id="amazon.nova-lite-v1
         }],
         "inferenceConfig": {"maxTokens": 1400, "temperature": 0.1},
     }
-    response = bedrock_client.invoke_model(
-        modelId=model_id,
-        body=json.dumps(request_body, ensure_ascii=False),
-        contentType="application/json",
-        accept="application/json",
-    )
+    for attempt in range(4):
+        try:
+            response = bedrock_client.invoke_model(
+                modelId=model_id,
+                body=json.dumps(request_body, ensure_ascii=False),
+                contentType="application/json",
+                accept="application/json",
+            )
+            break
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code", "")
+            if code not in {"ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException"} or attempt == 3:
+                raise
+            time.sleep(min(2 ** (attempt + 1), 12))
     return validate_entities(_parse_json_array(_response_text(response)), taxonomy)

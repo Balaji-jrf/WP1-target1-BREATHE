@@ -290,5 +290,5 @@ export async function fetchIngestionStatus(document_id) {
   const res = await fetch(`${API_URL}/document/${encodeURIComponent(document_id)}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Could not check ingestion status.');
-  return data.ingestion_status;
+  return { status: data.ingestion_status, error: data.ingestion_error || '' };
 }

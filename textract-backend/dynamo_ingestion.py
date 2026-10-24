@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
+from botocore.config import Config
 from ai_extractor import extract_chunk, page_chunks
 
 LOGGER = logging.getLogger(__name__)
@@ -29,7 +30,15 @@ TAXONOMY_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("TAXONOMY_TABLE", TAXONOMY_TABLE_NAME)
 )
 s3 = boto3.client("s3", region_name=AWS_REGION)
-bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name=AWS_REGION,
+    config=Config(
+        retries={"mode": "adaptive", "total_max_attempts": 5},
+        connect_timeout=5,
+        read_timeout=60,
+    ),
+)
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 
 
@@ -209,11 +218,11 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
             if crop_key:
                 attributes["s3_crop_url"] = f"s3://{s3_bucket}/{crop_key}"
             _put_entity(document_id, theme, entity_id, {"filename": filename, **attributes})
-    except Exception:
+    except Exception as error:
         OCR_TABLE.update_item(
             Key={"document_id": document_id},
-            UpdateExpression="SET ingestion_status = :status",
-            ExpressionAttributeValues={":status": "failed"},
+            UpdateExpression="SET ingestion_status = :status, ingestion_error = :error",
+            ExpressionAttributeValues={":status": "failed", ":error": str(error)[:500]},
         )
         raise
     written = len(staged_records)
@@ -222,7 +231,7 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
         Key={"document_id": document_id},
         UpdateExpression=(
             "SET ingestion_status = :status, extracted_entity_count = :count, "
-            "pending_review_count = :pending_count"
+            "pending_review_count = :pending_count REMOVE ingestion_error"
         ),
         ExpressionAttributeValues={
             ":status": ingestion_status,
@@ -265,12 +274,12 @@ def lambda_handler(event, context):
                 item["ocr_s3_key"],
                 item.get("s3_ocr_json_url"),
             )
-        except Exception:
+        except Exception as error:
             LOGGER.exception("Asynchronous ingestion failed for %s", document_id)
             OCR_TABLE.update_item(
                 Key={"document_id": document_id},
-                UpdateExpression="SET ingestion_status = :status",
-                ExpressionAttributeValues={":status": "failed"},
+                UpdateExpression="SET ingestion_status = :status, ingestion_error = :error",
+                ExpressionAttributeValues={":status": "failed", ":error": str(error)[:500]},
             )
         return
 
@@ -295,7 +304,7 @@ def lambda_handler(event, context):
             return _response(409, {"detail": "Entity extraction is already running"})
         OCR_TABLE.update_item(
             Key={"document_id": document_id},
-            UpdateExpression="SET ingestion_status = :status",
+            UpdateExpression="SET ingestion_status = :status REMOVE ingestion_error",
             ConditionExpression="attribute_not_exists(ingestion_status) OR ingestion_status <> :status",
             ExpressionAttributeValues={":status": "processing"},
         )

@@ -51,19 +51,20 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
     try {
       await ingestDocumentToDatabase(selectedId);
       setNotice('Nova Lite extraction started. Waiting for review records…');
-      let status = 'processing';
-      for (let attempt = 0; attempt < 180 && status === 'processing'; attempt += 1) {
+      let ingestion = { status: 'processing' };
+      for (let attempt = 0; attempt < 180 && ingestion.status === 'processing'; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
-        status = await fetchIngestionStatus(selectedId);
+        ingestion = await fetchIngestionStatus(selectedId);
       }
-      if (status === 'failed') throw new Error('Nova Lite extraction failed. Check the Lambda logs and retry.');
-      if (status === 'processing') throw new Error('Extraction is still running. Refresh this page shortly to review the results.');
+      if (ingestion.status === 'failed') throw new Error(ingestion.error || 'Nova Lite extraction failed. Check the Lambda logs and retry.');
+      if (ingestion.status === 'processing') throw new Error('Extraction is still running. Refresh this page shortly to review the results.');
       const staged = await fetchExtractions(selectedId, { status: 'pending_review' });
       setRecords(await fetchExtractions(selectedId));
       setReview(staged);
       setNotice(`Extraction finished · ${staged.length} records are ready for review.`);
       await loadDocuments();
     } catch (err) {
+      await loadDocuments();
       setError(err.message);
     } finally {
       setBusy(false);
