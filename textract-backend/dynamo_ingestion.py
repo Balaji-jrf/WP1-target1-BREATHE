@@ -15,7 +15,7 @@ from ai_extractor import extract_chunk, page_chunks
 LOGGER = logging.getLogger(__name__)
 
 OCR_TABLE_NAME = "jrf-task-ocr-DocumentOCR"
-ENTITIES_TABLE_NAME = "jrf-task-data-Extraction-entities"
+EXTRACTED_RECORDS_TABLE_NAME = "jrf-task-ocr-ExtractedRecords"
 TAXONOMY_TABLE_NAME = "jrf-task-data-EntityTaxonomy"
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
@@ -23,8 +23,8 @@ MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "1500"))
 OCR_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("DYNAMO_TABLE", OCR_TABLE_NAME)
 )
-ENTITIES_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
-    os.environ.get("ENTITIES_TABLE", ENTITIES_TABLE_NAME)
+EXTRACTED_RECORDS_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
+    os.environ.get("EXTRACTED_RECORDS_TABLE", EXTRACTED_RECORDS_TABLE_NAME)
 )
 TAXONOMY_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("TAXONOMY_TABLE", TAXONOMY_TABLE_NAME)
@@ -73,7 +73,7 @@ def _put_entity(document_id, theme, entity_id, attributes):
         item["district"] = district
     else:
         item.pop("district", None)
-    ENTITIES_TABLE.put_item(Item=_ddb_safe(item))
+    EXTRACTED_RECORDS_TABLE.put_item(Item=_ddb_safe(item))
 
 
 def _caption_for(figure, elements):

@@ -190,16 +190,16 @@ export async function downloadOcrJson(document_id) {
   URL.revokeObjectURL(url);
 }
 
-export async function fetchExtractions(document_id, filters = {}) {
+export async function fetchDocumentRecords(document_id, filters = {}) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
   const suffix = params.size ? `?${params.toString()}` : '';
-  const res = await fetch(`${API_URL}/api/database/extractions/${encodeURIComponent(document_id)}${suffix}`);
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records${suffix}`);
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Failed to load database extractions.');
-  return data.extractions || [];
+  if (!res.ok) throw new Error(data.detail || 'Failed to load document records.');
+  return data.records || [];
 }
 
 export async function fetchTaxonomy() {
@@ -229,9 +229,9 @@ export async function deleteTaxonomy(entity_key) {
   return data;
 }
 
-export async function updateExtraction(document_id, theme_entity_id, attributes) {
+export async function updateDocumentRecord(document_id, theme_entity_id, attributes) {
   const res = await fetch(
-    `${API_URL}/api/database/extraction/${encodeURIComponent(document_id)}/${encodeURIComponent(theme_entity_id)}`,
+    `${API_URL}/api/documents/${encodeURIComponent(document_id)}/records/${encodeURIComponent(theme_entity_id)}`,
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -239,8 +239,8 @@ export async function updateExtraction(document_id, theme_entity_id, attributes)
     },
   );
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Could not update extraction.');
-  return data.extraction;
+  if (!res.ok) throw new Error(data.detail || 'Could not update document record.');
+  return data.record;
 }
 
 export async function ingestDocumentToDatabase(document_id) {
@@ -254,35 +254,35 @@ export async function ingestDocumentToDatabase(document_id) {
   return data;
 }
 
-export async function saveExtraction(document_id, extraction, action = 'upsert') {
-  const res = await fetch(`${API_URL}/api/database/extractions/${encodeURIComponent(document_id)}`, {
+export async function createDocumentRecord(document_id, record) {
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, ...extraction }),
+    body: JSON.stringify(record),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Could not save extraction.');
+  if (!res.ok) throw new Error(data.detail || 'Could not create document record.');
   return data;
 }
 
-export async function deleteExtraction(document_id, theme_entity_id) {
+export async function deleteDocumentRecord(document_id, theme_entity_id) {
   const res = await fetch(
-    `${API_URL}/api/database/extraction/${encodeURIComponent(document_id)}/${encodeURIComponent(theme_entity_id)}`,
+    `${API_URL}/api/documents/${encodeURIComponent(document_id)}/records/${encodeURIComponent(theme_entity_id)}`,
     { method: 'DELETE' },
   );
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Could not delete extraction.');
+  if (!res.ok) throw new Error(data.detail || 'Could not delete document record.');
   return data;
 }
 
-export async function approveExtractions(document_id, approved_entity_ids) {
-  const res = await fetch(`${API_URL}/api/database/approve-extractions`, {
+export async function approveDocumentRecords(document_id, approved_entity_ids) {
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ document_id, approved_entity_ids }),
+    body: JSON.stringify({ approved_entity_ids }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Could not approve extractions.');
+  if (!res.ok) throw new Error(data.detail || 'Could not approve document records.');
   return data;
 }
 

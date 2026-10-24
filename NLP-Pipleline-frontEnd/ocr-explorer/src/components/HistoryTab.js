@@ -216,7 +216,7 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoad
   );
 }
 
-export default function HistoryTab({ onCountChange, onDatabase, onEntities }) {
+export default function HistoryTab({ onCountChange, onDatabase }) {
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
@@ -287,7 +287,6 @@ export default function HistoryTab({ onCountChange, onDatabase, onEntities }) {
           </p>
         </div>
         <button className="clear-btn" onClick={() => onDatabase?.('')}>Main Database</button>
-        <button className="clear-btn" onClick={() => onEntities?.('')}>Data-Extraction-entities Database</button>
         <button className="clear-btn" onClick={loadHistory} disabled={historyLoading}>
           {historyLoading ? 'Loading…' : '↻ Refresh'}
         </button>

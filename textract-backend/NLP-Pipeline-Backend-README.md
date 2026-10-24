@@ -171,26 +171,23 @@ The HTTP API must also be configured with the database routes below; adding hand
 code alone does not create API Gateway routes.
 
 | `POST` | `/api/documents/ingest-dynamo` | `jrf-task-dynamo-ingestion` — body: `{"document_id":"..."}` |
-| `GET` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — optional `theme`, `district`, `content_type` filters |
-| `POST` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — create/update/delete an entity (`action`, `theme_entity_id`, `attributes`) |
-| `POST` | `/api/database/custom-attribute` | `jrf-task-ocr-retrieval` — body: `document_id`, `theme_entity_id`, `key`, `value` |
-| `PUT` | `/api/database/extraction/{document_id}/{theme_entity_id}` | `jrf-task-ocr-retrieval` — edit staged or approved record fields |
-| `DELETE` | `/api/database/extraction/{document_id}/{theme_entity_id}` | `jrf-task-ocr-retrieval` — delete an extraction |
+| `GET` | `/api/documents/{document_id}/records` | `jrf-task-ocr-retrieval` — filters: `theme`, `district`, `location`, `pdf_page_num`, `content_type`, `entity_type`, `status` |
+| `POST` | `/api/documents/{document_id}/records` | `jrf-task-ocr-retrieval` — create a record |
+| `PUT` | `/api/documents/{document_id}/records/{theme_entity_id}` | `jrf-task-ocr-retrieval` — edit a record |
+| `DELETE` | `/api/documents/{document_id}/records/{theme_entity_id}` | `jrf-task-ocr-retrieval` — delete a record |
 | `GET` | `/api/database/taxonomy` | `jrf-task-ocr-retrieval` — list the dynamic extraction schema |
 | `POST` | `/api/database/taxonomy` | `jrf-task-ocr-retrieval` — add or update a taxonomy entry |
 | `DELETE` | `/api/database/taxonomy/{entity_key}` | `jrf-task-ocr-retrieval` — remove a taxonomy entry |
-| `POST` | `/api/database/approve-extractions` | `jrf-task-ocr-retrieval` — approve selected staged IDs |
+| `POST` | `/api/documents/{document_id}/records/approve` | `jrf-task-ocr-retrieval` — approve selected staged records |
 
-The retrieval Lambda uses `ENTITIES_TABLE=jrf-task-data-Extraction-entities` for the
-entity table. Its role needs `dynamodb:Query`, `dynamodb:GetItem`, `dynamodb:PutItem`,
-and `dynamodb:DeleteItem` on that table, `dynamodb:UpdateItem` on DocumentOCR, and
-`s3:GetObject` for the OCR JSON in the existing OCR bucket. The entity table's
-ThemeIndex and LocationIndex use `theme` or `district` as the partition key and
-`document_id` as the sort key.
+Extracted output is stored in `jrf-task-ocr-ExtractedRecords`, configured through
+`EXTRACTED_RECORDS_TABLE`. It uses `(id, theme_entity_id)` keys and the ThemeIndex and
+LocationIndex. The retrieval role needs DynamoDB read/write access to this table,
+update access to DocumentOCR, and `s3:GetObject` for OCR JSON.
 
 Add the routes above to the HTTP API with Lambda proxy integration to
 `jrf-task-dynamo-ingestion` for the ingestion route and `jrf-task-ocr-retrieval`
-for the extraction, review, taxonomy, and custom-attribute routes. API Gateway CORS
+for document-record and taxonomy routes. API Gateway CORS
 must allow `GET, POST, PUT, DELETE, OPTIONS` and the `content-type` header for the
 configured frontend origins. Package `dynamo_ingestion.py` as `lambda_function.py`
 and include `ai_extractor.py` in the ingestion Lambda package because its configured
@@ -206,7 +203,7 @@ with an unknown theme, fewer than five words / 35 characters, or confidence belo
 0.55 are discarded. Facts, tables, and figures are written with
 `review_status=pending_review`; the document's `ingestion_status` is set accordingly.
 
-`GET /api/database/extractions/{document_id}` returns approved records by default.
+`GET /api/documents/{document_id}/records` returns approved records by default.
 Use `?status=pending_review` for the review queue or `?status=all` for all records.
 The frontend can edit and delete staged records, add manual facts, and approve chosen
 `theme_entity_id` values. Approval marks them `approved`; the document changes to
@@ -230,11 +227,15 @@ The current deployed DocumentOCR table has only the
 the ingestion writes `record_type="METADATA"` as a regular attribute while preserving
 the existing table and its records. The script creates the extraction-entities table
 and rejects incompatible existing key schemas rather than deleting or replacing data.
+The legacy `jrf-task-data-Extraction-entities` table was migrated to
+`jrf-task-ocr-ExtractedRecords`; 1,478 source records were key-verified before the
+old table was removed. Backup `before-records-table-migration-20261024` is available
+for recovery. `migrate_extracted_records.py` documents the one-time copy operation.
 For a new environment, provision the OCR table with the same existing single-key
 schema before deploying these functions.
 
 Entity ingestion reads the completed `ocr_s3_key`, writes table, figure, and
-keyword-matched passage records, and updates OCR metadata with counts and ingestion
+Nova Lite extracted-fact records, and updates OCR metadata with counts and ingestion
 status. Re-running ingestion upserts records with stable document/page identifiers.
 Figure `s3_crop_url` values are stable `s3://` URIs; retrieval presigned URLs remain
 short-lived and are returned only by the existing document endpoint.

@@ -302,6 +302,31 @@ footer span { margin: 0 8px; color: #d46a46; }
 .taxonomy-list article code, .taxonomy-list article span { color: #87928b; font: 9px 'DM Mono', monospace; }
 .taxonomy-list article span { grid-column: 1; }
 .taxonomy-list article button { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.database-doc-search { width: calc(100% - 24px); margin: 0 12px 10px; padding: 9px; border: 1px solid #d9e1d8; border-radius: 7px; font: 11px 'DM Mono', monospace; }
+.record-filter-bar { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 10px; align-items: end; margin: 10px 0 16px; padding: 14px; border: 1px solid #e5e9e2; border-radius: 10px; background: #f8faf6; }
+.record-filter-bar label, .record-add-form label { display: grid; gap: 5px; color: #78867e; font: 9px 'DM Mono', monospace; letter-spacing: .04em; text-transform: uppercase; }
+.record-filter-bar input, .record-filter-bar select, .record-add-form input, .record-add-form select, .record-add-form textarea { min-width: 0; width: 100%; padding: 8px; border: 1px solid #d9e1d8; border-radius: 6px; color: #26372f; background: white; font: 10px 'DM Mono', monospace; }
+.records-table-wrap { width: 100%; overflow: auto; border: 1px solid #d9e1d8; border-radius: 10px; }
+.records-table { width: 100%; min-width: 980px; border-collapse: collapse; background: #fffefa; }
+.records-table th { position: sticky; top: 0; padding: 11px 9px; border-bottom: 1px solid #d9e1d8; background: #f1f5ef; color: #617267; text-align: left; font: 9px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .05em; }
+.records-table td { max-width: 300px; padding: 10px 9px; border-bottom: 1px solid #e9ede7; color: #31463a; vertical-align: top; font: 11px/1.45 'DM Mono', monospace; }
+.records-table tr:last-child td { border-bottom: 0; }
+.records-table td input, .records-table td select, .records-table td textarea { max-width: 250px; width: 100%; padding: 7px; border: 1px solid #cdd9cf; border-radius: 5px; font: 10px 'DM Mono', monospace; }
+.record-fact-cell { min-width: 280px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.record-fact-cell strong { font: 13px/1.5 'Fraunces', serif; font-weight: 400; }
+.record-fact-cell details { margin-top: 7px; color: #849189; font-size: 9px; }
+.record-fact-cell details p { max-height: 160px; overflow: auto; white-space: pre-wrap; }
+.record-status { display: inline-block; padding: 4px 6px; border-radius: 5px; background: #fff2d9; color: #906620; font-size: 8px; white-space: nowrap; }
+.record-status.approved, .record-status.edited_and_approved { background: #e6f4e9; color: #34764a; }
+.record-status.legacy { background: #eef0ed; color: #748078; }
+.record-actions { white-space: nowrap; }
+.record-actions button { display: block; margin: 0 0 5px; padding: 5px 7px; border: 1px solid #d9e1d8; border-radius: 5px; background: #fff; color: #41604f; font: 9px 'DM Mono', monospace; cursor: pointer; }
+.record-actions .entity-delete { color: #b44f35; }
+.record-add-form { display: grid; grid-template-columns: 1fr 100px 2fr 1fr 1fr auto; align-items: end; gap: 9px; margin: 0 0 14px; padding: 14px; border: 1px solid #d9e1d8; border-radius: 10px; background: #fffefa; }
+.record-add-form textarea { min-height: 38px; resize: vertical; }
+.record-add-form > div { display: flex; gap: 6px; }
+.taxonomy-active-check { display: flex; align-items: center; gap: 8px; color: #718078; font: 10px 'DM Mono', monospace; }
+@media (max-width: 900px) { .record-filter-bar { grid-template-columns: repeat(2, minmax(0,1fr)); } .record-add-form { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 @media (max-width: 620px) { .review-fields, .taxonomy-form { grid-template-columns: 1fr; } .review-fields label:nth-child(2) { grid-column: auto; } }
 .entity-list { padding: 0 14px 14px; }
 .entity-row { margin-bottom: 9px; }

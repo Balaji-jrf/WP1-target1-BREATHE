@@ -1,4 +1,4 @@
-"""Provision the OCR and extracted-entity DynamoDB tables safely.
+"""Provision the OCR and extracted-record DynamoDB tables safely.
 
 The existing DocumentOCR table uses document_id as its sole key. DynamoDB does
 not support changing a table's key schema in place, so this script preserves
@@ -160,7 +160,7 @@ def main():
     )
     ensure_table(
         client,
-        "jrf-task-data-Extraction-entities",
+        "jrf-task-ocr-ExtractedRecords",
         [
             {"AttributeName": "id", "KeyType": "HASH"},
             {"AttributeName": "theme_entity_id", "KeyType": "RANGE"},

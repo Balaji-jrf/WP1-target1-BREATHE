@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { approveExtractions, deleteExtraction, saveExtraction, updateExtraction } from '../api';
+import { approveDocumentRecords, createDocumentRecord, deleteDocumentRecord, updateDocumentRecord } from '../api';
 
 export default function ExtractionReviewModal({ documentId, records, taxonomy, onClose, onChanged }) {
   const [items, setItems] = useState(records);
@@ -13,7 +13,7 @@ export default function ExtractionReviewModal({ documentId, records, taxonomy, o
   const patch = async (item, attributes) => {
     setBusy(true); setError('');
     try {
-      const updated = await updateExtraction(documentId, item.theme_entity_id, attributes);
+      const updated = await updateDocumentRecord(documentId, item.theme_entity_id, attributes);
       setItems((current) => current.map((row) => row.theme_entity_id === item.theme_entity_id ? updated : row));
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
@@ -21,7 +21,7 @@ export default function ExtractionReviewModal({ documentId, records, taxonomy, o
   const remove = async (item) => {
     setBusy(true); setError('');
     try {
-      await deleteExtraction(documentId, item.theme_entity_id);
+      await deleteDocumentRecord(documentId, item.theme_entity_id);
       setItems((current) => current.filter((row) => row.theme_entity_id !== item.theme_entity_id));
       setSelected((current) => { const next = new Set(current); next.delete(item.theme_entity_id); return next; });
     } catch (err) { setError(err.message); }
@@ -33,8 +33,8 @@ export default function ExtractionReviewModal({ documentId, records, taxonomy, o
     const id = `${theme}#MANUAL_${Date.now()}`;
     setBusy(true); setError('');
     try {
-      const result = await saveExtraction(documentId, { theme_entity_id: id, theme, entity_type: 'manual_fact', content_type: 'narrative_text', extracted_fact: '', review_status: 'pending_review', spatial_units: {}, custom_attributes: {} }, 'create');
-      setItems((current) => [...current, result.extraction]);
+      const result = await createDocumentRecord(documentId, { theme_entity_id: id, theme, entity_type: 'manual_fact', content_type: 'narrative_text', extracted_fact: '', review_status: 'pending_review', spatial_units: {}, custom_attributes: {} });
+      setItems((current) => [...current, result.record]);
       setSelected((current) => new Set([...current, id]));
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
@@ -43,7 +43,7 @@ export default function ExtractionReviewModal({ documentId, records, taxonomy, o
     if (!selected.size) { setError('Select at least one extraction to approve.'); return; }
     setBusy(true); setError('');
     try {
-      await approveExtractions(documentId, [...selected]);
+      await approveDocumentRecords(documentId, [...selected]);
       await onChanged(); onClose();
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
