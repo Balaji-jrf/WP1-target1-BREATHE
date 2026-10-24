@@ -200,6 +200,26 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
     }
   };
 
+  const openPendingReview = async () => {
+    if (!selectedId) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const pending = await fetchDocumentRecords(selectedId, { status: 'pending_review' });
+      if (!pending.length) {
+        await loadDocuments();
+        setNotice('No records are waiting for review. Document status refreshed.');
+        return;
+      }
+      setReview(pending);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const ingest = async () => {
     if (!selectedId) return;
     setBusy(true);
@@ -308,7 +328,9 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
               <button className="process-button" onClick={ingest} disabled={busy || selected.status !== 'completed' || ['processing', 'pending_review'].includes(selected.ingestion_status)}>
                 {busy ? 'Nova Lite extracting…' : '↻ Ingest OCR data'}
               </button>
-              {selected.ingestion_status === 'pending_review' && <button className="clear-btn" onClick={async () => setReview(await fetchDocumentRecords(selectedId, { status: 'pending_review' }))}>Review pending ({selected.pending_review_count ?? '…'})</button>}
+              {(selected.ingestion_status === 'pending_review' || Number(selected.pending_review_count) > 0) && <button className="process-button" onClick={openPendingReview} disabled={busy}>
+                {busy ? 'Loading pending records…' : `Review & approve remaining (${selected.pending_review_count ?? 'pending'})`}
+              </button>}
             </div>
             <div className="database-metadata-grid">
               {[

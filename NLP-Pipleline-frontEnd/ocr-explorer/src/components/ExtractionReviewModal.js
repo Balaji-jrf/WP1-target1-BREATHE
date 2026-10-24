@@ -59,7 +59,7 @@ export default function ExtractionReviewModal({ documentId, records, taxonomy, o
 
   return <div className="modal-overlay" role="presentation" onClick={onClose}>
     <section className="modal-box extraction-review" role="dialog" aria-modal="true" aria-label="Review OCR extractions" onClick={(event) => event.stopPropagation()}>
-      <header className="modal-header"><div><span className="modal-title">Review extracted research facts</span><p>{items.length} staged records · select the facts to approve</p></div><button className="modal-close" onClick={onClose}>✕</button></header>
+      <header className="modal-header"><div><span className="modal-title">Review extracted research facts</span><p>{items.length} pending records · select the facts to approve</p><button type="button" className="clear-btn" onClick={() => setSelected(new Set(items.map((item) => item.theme_entity_id)))} disabled={busy || !items.length}>Select all pending</button></div><button className="modal-close" onClick={onClose}>✕</button></header>
       <div className="modal-body extraction-review-body">
         {error && <div className="message error-message" role="alert">{error}</div>}
         {items.length === 0 && <p className="database-empty">No pending extractions remain.</p>}
