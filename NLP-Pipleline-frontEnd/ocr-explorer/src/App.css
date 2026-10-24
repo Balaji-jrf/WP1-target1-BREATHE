@@ -269,6 +269,7 @@ footer span { margin: 0 8px; color: #d46a46; }
 .database-empty { padding: 25px 15px; border: 1px dashed #d9e1d8; border-radius: 9px; color: #87928b; font: 11px/1.6 'DM Mono', monospace; text-align: center; }
 .database-muted { padding: 0 15px 12px; color: #87928b; font: 10px 'DM Mono', monospace; }
 .database-notice { margin-bottom: 15px; padding: 11px 14px; border: 1px solid #d8e7d9; border-radius: 8px; background: #f0f6ef; color: #315641; font: 10px 'DM Mono', monospace; }
+.database-processing-hint { margin: 12px 0 0; padding: 10px 12px; border: 1px solid #ead9ad; border-radius: 8px; background: #fff9e9; color: #806b38; font: 10px/1.5 'DM Mono', monospace; }
 .entity-controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 17px; }
 .entity-controls label, .entity-form label { display: flex; flex-direction: column; gap: 7px; color: #78867e; font: 9px 'DM Mono', monospace; letter-spacing: .06em; text-transform: uppercase; }
 .entity-controls select, .entity-form input, .entity-form select, .entity-form textarea { min-width: 220px; max-width: 100%; padding: 10px 11px; border: 1px solid #d9e1d8; border-radius: 7px; background: #fff; color: #26372f; font: 11px 'DM Mono', monospace; text-transform: none; }

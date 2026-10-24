@@ -160,6 +160,22 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
   useEffect(() => { loadDocuments(); fetchTaxonomy().then(setTaxonomy).catch((err) => setError(err.message)); }, [loadDocuments]);
 
   useEffect(() => {
+    if (!selectedId || selected?.status !== 'processing') return undefined;
+    let active = true;
+    const pollStatus = async () => {
+      try {
+        const result = await fetchDocuments();
+        if (active) setDocuments(result);
+      } catch { /* Keep polling; the manual Refresh button remains available. */ }
+    };
+    const timer = window.setInterval(pollStatus, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [selectedId, selected?.status]);
+
+  useEffect(() => {
     let active = true;
     if (!selectedId) { setRecords([]); setNextPageToken(''); setRecordsLoading(false); return undefined; }
     setError('');
@@ -325,13 +341,14 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
             <div className="database-detail-heading">
               <div><p className="section-kicker">Selected document</p><h3>{selected.filename || selected.document_name}</h3>
                 <code>{selected.document_id}</code></div>
-              <button className="process-button" onClick={ingest} disabled={busy || selected.status !== 'completed' || ['processing', 'pending_review'].includes(selected.ingestion_status)}>
-                {busy ? 'Nova Lite extracting…' : '↻ Ingest OCR data'}
+              <button className="process-button" onClick={ingest} disabled={busy || selected.status !== 'completed' || ['processing', 'pending_review'].includes(selected.ingestion_status)} title={selected.status === 'processing' ? 'Wait for Textract OCR to finish before database ingestion.' : selected.status !== 'completed' ? 'OCR must complete successfully before ingestion.' : ''}>
+                {busy ? 'Nova Lite extracting…' : selected.status === 'processing' ? 'OCR processing…' : '↻ Ingest OCR data'}
               </button>
               {(selected.ingestion_status === 'pending_review' || Number(selected.pending_review_count) > 0) && <button className="process-button" onClick={openPendingReview} disabled={busy}>
                 {busy ? 'Loading pending records…' : `Review & approve remaining (${selected.pending_review_count ?? 'pending'})`}
               </button>}
             </div>
+            {selected.status === 'processing' && <p className="database-processing-hint" role="status">OCR is still processing this document. Large PDFs can take a while; status refreshes automatically every 5 seconds. Database ingestion will be available when OCR completes.</p>}
             <div className="database-metadata-grid">
               {[
                   ['Status', selected.status], ['Pages', selected.total_pages],
