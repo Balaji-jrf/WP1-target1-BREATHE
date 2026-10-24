@@ -178,7 +178,7 @@ function CompareView({ item, docUrl, onClose }) {
   );
 }
 
-function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownload, isDownloading }) {
+function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoading, onDownload, isDownloading }) {
   const size = formatSize(item.file_size_bytes);
   const time = formatTime(item.processing_time_seconds);
   const busy = isLoading || isDownloading;
@@ -209,11 +209,14 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, isLoading, onDownl
           {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
         </button>
       </div>
+        <button className="hcard-btn hcard-btn-download hcard-btn-database" onClick={() => onDatabase(item.document_id)} disabled={busy}>
+          Database
+        </button>
     </div>
   );
 }
 
-export default function HistoryTab({ onCountChange }) {
+export default function HistoryTab({ onCountChange, onDatabase, onEntities }) {
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
@@ -283,6 +286,8 @@ export default function HistoryTab({ onCountChange }) {
             Browse all extracted documents, OCR output JSON. <br></br>View the original file, read the OCR text, layouts, tables, images <br></br>Use Compare to see both side-by-side, understand better
           </p>
         </div>
+        <button className="clear-btn" onClick={() => onDatabase?.('')}>Main Database</button>
+        <button className="clear-btn" onClick={() => onEntities?.('')}>Data-Extraction-entities Database</button>
         <button className="clear-btn" onClick={loadHistory} disabled={historyLoading}>
           {historyLoading ? 'Loading…' : '↻ Refresh'}
         </button>
@@ -311,6 +316,7 @@ export default function HistoryTab({ onCountChange }) {
                   onViewDoc={(id) => loadAndOpen(id, 'doc')}
                   onViewOcr={(id) => loadAndOpen(id, 'ocr')}
                   onCompare={(id) => loadAndOpen(id, 'compare')}
+                  onDatabase={(id) => onDatabase?.(id)}
                   onDownload={handleDownload}
                 />
               ))}

@@ -189,3 +189,48 @@ export async function downloadOcrJson(document_id) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+export async function fetchExtractions(document_id, filters = {}) {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const res = await fetch(`${API_URL}/api/database/extractions/${encodeURIComponent(document_id)}${suffix}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Failed to load database extractions.');
+  return data.extractions || [];
+}
+
+export async function ingestDocumentToDatabase(document_id) {
+  const res = await fetch(`${API_URL}/api/documents/ingest-dynamo`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document_id }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Database ingestion failed.');
+  return data;
+}
+
+export async function saveExtraction(document_id, extraction, action = 'upsert') {
+  const res = await fetch(`${API_URL}/api/database/extractions/${encodeURIComponent(document_id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...extraction }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not save extraction.');
+  return data;
+}
+
+export async function deleteExtraction(document_id, theme_entity_id) {
+  const res = await fetch(`${API_URL}/api/database/extractions/${encodeURIComponent(document_id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'delete', theme_entity_id }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not delete extraction.');
+  return data;
+}

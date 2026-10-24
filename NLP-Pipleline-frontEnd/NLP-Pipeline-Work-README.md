@@ -47,6 +47,14 @@ OCR explorer on the right. Text, layout, tables, and figures are filtered to tha
 The browser's built-in PDF viewer does not expose text bounding boxes to the app, so
 precise highlights drawn over text inside the PDF itself require a PDF.js-based viewer.
 
+The **Database** tab lists OCR documents and shows the selected document's metadata and
+stored extraction records. Use **Ingest OCR data** after OCR completes to populate the
+metadata and entity tables. The **Data-Extraction-entities** tab provides per-document
+create, update, delete, and theme-filter controls for extraction records. These features
+use the `/api/database/...` routes described in the backend README; the API Gateway must
+route those paths to the retrieval Lambda and the Lambda role must have access to both
+DynamoDB tables.
+
 ```json
 {
   "page": 1,

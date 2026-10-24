@@ -167,6 +167,46 @@ Lambda provides `AWS_REGION` automatically. All functions and AWS clients use
 | `GET` | `/documents` | `jrf-task-ocr-retrieval` |
 | `GET` | `/document/{document_id}` | `jrf-task-ocr-retrieval` |
 
+The HTTP API must also be configured with the database routes below; adding handler
+code alone does not create API Gateway routes.
+
+| `POST` | `/api/documents/ingest-dynamo` | `jrf-task-ocr-retrieval` — body: `{"document_id":"..."}` |
+| `GET` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — optional `theme`, `district`, `content_type` filters |
+| `POST` | `/api/database/extractions/{document_id}` | `jrf-task-ocr-retrieval` — create/update/delete an entity (`action`, `theme_entity_id`, `attributes`) |
+| `POST` | `/api/database/custom-attribute` | `jrf-task-ocr-retrieval` — body: `document_id`, `theme_entity_id`, `key`, `value` |
+
+The retrieval Lambda uses `ENTITIES_TABLE=jrf-task-data-Extraction-entities` for the
+entity table. Its role needs `dynamodb:Query`, `dynamodb:GetItem`, `dynamodb:PutItem`,
+and `dynamodb:DeleteItem` on that table, `dynamodb:UpdateItem` on DocumentOCR, and
+`s3:GetObject` for the OCR JSON in the existing OCR bucket. The entity table's
+ThemeIndex and LocationIndex use `theme` or `district` as the partition key and
+`document_id` as the sort key.
+
+Add the routes above to the HTTP API with Lambda proxy integration to
+`jrf-task-ocr-retrieval`. API Gateway CORS must allow `GET, POST, OPTIONS` and the
+`content-type` header for the configured frontend origins. Deploy both
+`lambda_retrieval.py` and `dynamo_ingestion.py` in the retrieval Lambda package.
+
+Provision or inspect the tables with:
+
+```bash
+python3 textract-backend/provision_tables.py --region ap-southeast-2
+```
+
+The current deployed DocumentOCR table has only the
+`document_id` partition key. DynamoDB cannot add `record_type` as a sort key in place;
+the ingestion writes `record_type="METADATA"` as a regular attribute while preserving
+the existing table and its records. The script creates the extraction-entities table
+and rejects incompatible existing key schemas rather than deleting or replacing data.
+For a new environment, provision the OCR table with the same existing single-key
+schema before deploying these functions.
+
+Entity ingestion reads the completed `ocr_s3_key`, writes table, figure, and
+keyword-matched passage records, and updates OCR metadata with counts and ingestion
+status. Re-running ingestion upserts records with stable document/page identifiers.
+Figure `s3_crop_url` values are stable `s3://` URIs; retrieval presigned URLs remain
+short-lived and are returned only by the existing document endpoint.
+
 The deployed `prod` stage has CORS configured for the production frontend and
 `http://localhost:3000`. API routes currently use no authentication; CORS does not
 protect the API from non-browser clients. Add authentication and request controls before

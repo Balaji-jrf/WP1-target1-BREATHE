@@ -100,12 +100,6 @@ export default function OcrResults({ result, pageFilter, onPageFilterChange }) {
       <div className="ocr-toolbar">
         <div className="ocr-tabs" role="tablist" aria-label="OCR result types">
           {TABS.map((tab) => {
-            const count = {
-              text: textElements.length,
-              layout: layoutBlocks.length,
-              tables: tables.length,
-              figures: figures.length,
-            }[tab.id];
             return (
               <button
                 type="button"

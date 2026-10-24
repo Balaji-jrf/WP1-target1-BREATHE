@@ -2,10 +2,14 @@ import React, { useState } from 'react';
 import './App.css';
 import ExtractTab from './components/ExtractTab';
 import HistoryTab from './components/HistoryTab';
+import DatabaseTab from './components/DatabaseTab';
+import ExtractionEntitiesTab from './components/ExtractionEntitiesTab';
 
 export default function App() {
   const [tab, setTab] = useState('extract');
   const [historyCount, setHistoryCount] = useState(0);
+  const [databaseDocumentId, setDatabaseDocumentId] = useState('');
+  const [entityDocumentId, setEntityDocumentId] = useState('');
 
   return (
     <main className="app-shell">
@@ -25,6 +29,12 @@ export default function App() {
           <button className={tab === 'atlas' ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>
             Atlas
           </button>
+          <button className={tab === 'database' ? 'tab active' : 'tab'} onClick={() => setTab('database')}>
+            Database
+          </button>
+          <button className={tab === 'entities' ? 'tab active' : 'tab'} onClick={() => setTab('entities')}>
+            Data-Extraction-entities
+          </button>
           <button className={tab === 'history' ? 'tab active' : 'tab'} onClick={() => setTab('history')}>
             History {historyCount > 0 && <span className="badge">{historyCount}</span>}
           </button>
@@ -34,7 +44,13 @@ export default function App() {
       </header>
 
       {tab === 'extract' && <ExtractTab />}
-      {tab === 'history' && <HistoryTab onCountChange={setHistoryCount} />}
+      {tab === 'history' && <HistoryTab
+        onCountChange={setHistoryCount}
+        onDatabase={(documentId) => { setDatabaseDocumentId(documentId || ''); setTab('database'); }}
+        onEntities={(documentId) => { setEntityDocumentId(documentId || ''); setTab('entities'); }}
+      />}
+      {tab === 'database' && <DatabaseTab initialDocumentId={databaseDocumentId} />}
+      {tab === 'entities' && <ExtractionEntitiesTab initialDocumentId={entityDocumentId} />}
     </main>
   );
 }
