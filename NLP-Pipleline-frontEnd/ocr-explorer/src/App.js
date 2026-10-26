@@ -22,21 +22,19 @@ export default function App() {
           <button className={tab === 'extract' ? 'tab active' : 'tab'} onClick={() => setTab('extract')}>
             Input Extract
           </button>
-          <button className={tab === 'llm' ? 'tab active' : 'tab'} onClick={() => setTab('llm')}>
-            LLM Model
+          <button className={tab === 'history' ? 'tab active' : 'tab'} onClick={() => setTab('history')}>
+            OCR History {historyCount > 0 && <span className="badge">{historyCount}</span>}
           </button>
-          <button className={tab === 'atlas' ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>
-            Atlas
+          <button className={tab === 'llm' ? 'tab active' : 'tab'} onClick={() => setTab('llm')}>
+            Chat with AI
           </button>
           <button className={tab === 'database' ? 'tab active' : 'tab'} onClick={() => setTab('database')}>
-            Database
+            AI-Extraction & Database
           </button>
           <button className={tab === 'taxonomy' ? 'tab active' : 'tab'} onClick={() => setTab('taxonomy')}>
             Active entity taxonomy
           </button>
-          <button className={tab === 'history' ? 'tab active' : 'tab'} onClick={() => setTab('history')}>
-            History {historyCount > 0 && <span className="badge">{historyCount}</span>}
-          </button>
+          
         </nav>
         <span className="service-status"><span /> Textract ready</span>
         <span className="service-status llm-status"><span className="dot-orange" /> LLM Model — ongoing</span>
