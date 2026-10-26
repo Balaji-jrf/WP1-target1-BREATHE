@@ -17,6 +17,7 @@ lambda_function.py so this module stays independently testable.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 
@@ -26,6 +27,10 @@ from botocore.exceptions import ClientError
 MIN_FACT_WORDS  = 5     # reject facts shorter than 5 words
 MIN_FACT_CHARS  = 35    # reject facts shorter than 35 characters
 MIN_CONFIDENCE  = 0.55  # reject facts where Nova Lite confidence < 0.55
+
+# Minimum chunk size worth sending to Nova Lite — very short chunks
+# (page numbers, headers, single lines) produce unreliable responses
+MIN_CHUNK_CHARS = 80
 
 
 # ── Bounding-box helpers ──────────────────────────────────────────────────────
@@ -169,32 +174,51 @@ def _response_text(response):
     return text.strip()
 
 
+# Logger for this module — visible in CloudWatch under jrf-task-dynamo-ingestion
+_LOG = logging.getLogger(__name__)
+
+
 def _parse_json_array(text):
     """
     Parse a JSON array from Nova Lite's response text.
 
-    Nova Lite sometimes wraps the array in a markdown code fence (```json).
-    This function strips the fence if present, then extracts the first
-    [...] array found in the string.
-    Raises ValueError if no valid JSON array is found.
+    Nova Lite sometimes:
+      - Wraps the array in a markdown code fence (```json ... ```)
+      - Returns a plain-text refusal ("I cannot extract...") with no array
+      - Returns an empty array [] directly
+      - Returns extra commentary before or after the array
+
+    Strategy: strip any code fence, then find the outermost [...] bracket
+    pair. If none exists, log the raw response and return [] so the
+    ingestion continues rather than crashing the entire document.
     """
     cleaned = text.strip()
     fence   = chr(96) * 3  # ```
 
-    # Strip markdown code fence if present
+    # Strip markdown code fence if present (```json\n[...]\n```)
     if cleaned.startswith(fence):
         cleaned = cleaned.split("\n", 1)[-1]
         if cleaned.rstrip().endswith(fence):
             cleaned = cleaned.rstrip()[:-3].strip()
 
-    # Find the outermost JSON array
+    # Find the outermost JSON array brackets
     start, end = cleaned.find("["), cleaned.rfind("]")
     if start < 0 or end < start:
-        raise ValueError("Nova Lite response did not contain a JSON array")
+        # Nova Lite returned prose instead of JSON — log it and skip this chunk
+        _LOG.warning("Nova Lite returned no JSON array — raw response: %.400s", text)
+        return []
 
-    parsed = json.loads(cleaned[start:end + 1])
+    try:
+        parsed = json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError as exc:
+        # Malformed JSON — log and skip rather than crash
+        _LOG.warning("Nova Lite JSON parse error (%s) — raw: %.400s", exc, text)
+        return []
+
     if not isinstance(parsed, list):
-        raise ValueError("Nova Lite response must be a JSON array")
+        _LOG.warning("Nova Lite response was not a list — raw: %.400s", text)
+        return []
+
     return parsed
 
 
@@ -280,6 +304,13 @@ def extract_chunk(chunk, taxonomy, bedrock_client, model_id="amazon.nova-lite-v1
     if not any(item.get("is_active", True) for item in taxonomy):
         raise ValueError("No active entity taxonomy is configured")
 
+    # Skip chunks that are too short — they produce unreliable Nova Lite responses
+    # (e.g. a page containing only a page number or a single heading)
+    if len(chunk.get("text", "")) < MIN_CHUNK_CHARS:
+        _LOG.info("Skipping short chunk page=%s chunk=%s (%d chars)",
+                  chunk.get("page"), chunk.get("chunk_index"), len(chunk.get("text", "")))
+        return []
+
     request_body = {
         "schemaVersion": "messages-v1",
         "system": [{"text": build_system_prompt(taxonomy)}],
@@ -296,7 +327,7 @@ def extract_chunk(chunk, taxonomy, bedrock_client, model_id="amazon.nova-lite-v1
         "inferenceConfig": {"maxTokens": 1400, "temperature": 0.1},
     }
 
-    for attempt in range(4):
+    for attempt in range(6):
         try:
             response = bedrock_client.invoke_model(
                 modelId=model_id,
@@ -308,8 +339,17 @@ def extract_chunk(chunk, taxonomy, bedrock_client, model_id="amazon.nova-lite-v1
         except ClientError as error:
             code = error.response.get("Error", {}).get("Code", "")
             retryable = {"ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException"}
-            if code not in retryable or attempt == 3:
+            if code not in retryable or attempt == 5:
                 raise  # non-retryable or exhausted retries
-            time.sleep(min(2 ** (attempt + 1), 12))  # 2s, 4s, 8s, 12s
+            # Exponential back-off with jitter: 2s, 4s, 8s, 16s, 30s
+            # Jitter spreads retries from parallel threads so they don't all
+            # hit Bedrock at the same moment after a throttle.
+            import random
+            sleep_time = min(2 ** (attempt + 1), 30) + random.uniform(0, 2)
+            _LOG.info("Throttled on attempt %d — sleeping %.1fs", attempt + 1, sleep_time)
+            time.sleep(sleep_time)
 
-    return validate_entities(_parse_json_array(_response_text(response)), taxonomy)
+    raw_text = _response_text(response)
+    _LOG.debug("Nova Lite raw response (page %s chunk %s): %.300s",
+               chunk.get("page"), chunk.get("chunk_index"), raw_text)
+    return validate_entities(_parse_json_array(raw_text), taxonomy)

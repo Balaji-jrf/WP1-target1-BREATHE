@@ -3,32 +3,30 @@ lambda_function.py  —  jrf-task-dynamo-ingestion
 =================================================
 Lambda handler: lambda_function.lambda_handler
 
-This is the AI-powered ingestion Lambda for the BREATHE NLP pipeline.
-It is the ONLY Lambda that calls Amazon Bedrock (Nova Lite).
+PERFORMANCE DESIGN
+------------------
+Problem: 160-page doc = ~960 Nova Lite calls. Sequential at ~2s each = 32 min.
+         Lambda timeout = 15 min → it dies before finishing.
+         518-page doc = ~3000 calls = ~100 min → completely impossible sequentially.
+
+Solution: ThreadPoolExecutor runs PARALLEL_WORKERS=20 Nova Lite calls at once.
+          960 calls ÷ 20 workers = ~48 batches × 2s = ~96s for 160 pages.
+          3000 calls ÷ 20 workers = ~150 batches × 2s = ~5 min for 518 pages.
+          DynamoDB writes use batch_writer() for up to 25 items per request.
 
 Two execution modes
 -------------------
-1. HTTP mode  (triggered by API Gateway POST /api/documents/ingest-dynamo)
-   - Validates the document exists and OCR is complete
-   - Marks ingestion_status = "processing" in DynamoDB
-   - Invokes itself asynchronously (InvocationType="Event") so the HTTP
-     response returns immediately (202 Accepted) without waiting for Nova Lite
-   - Frontend polls /document/{id} to watch ingestion_status change
+1. HTTP mode  (API Gateway POST /api/documents/ingest-dynamo)
+   → Validates doc, marks processing, self-invokes async, returns 202 immediately.
 
 2. Async worker mode  (self-invoked with {"async_worker": True, "document_id": "..."})
-   - Loads the OCR JSON from S3
-   - Loads the active entity taxonomy from DynamoDB
-   - Splits OCR text into page chunks and sends each to Nova Lite
-   - Writes every extracted fact / table / figure as a record in
-     jrf-task-ocr-ExtractedRecords with review_status = "pending_review"
-   - Updates ingestion_status in jrf-task-ocr-DocumentOCR to
-     "pending_review" (records exist) or "completed" (nothing extracted)
+   → Loads OCR JSON from S3, runs parallel extraction, batch-writes to DynamoDB.
 
-DynamoDB tables used
---------------------
+DynamoDB tables
+---------------
   jrf-task-ocr-DocumentOCR      — document metadata + ingestion status
   jrf-task-ocr-ExtractedRecords — one item per extracted fact/table/figure
-  jrf-task-data-EntityTaxonomy  — active entity taxonomy (read-only here)
+  jrf-task-data-EntityTaxonomy  — active entity taxonomy (read-only)
 
 Environment variables
 ---------------------
@@ -37,9 +35,8 @@ Environment variables
   TAXONOMY_TABLE          — EntityTaxonomy table name
   BEDROCK_MODEL_ID        — Bedrock model (default: amazon.nova-lite-v1:0)
   MAX_CHUNK_CHARS         — max OCR chars per Nova Lite call (default: 1500)
+  PARALLEL_WORKERS        — concurrent Nova Lite threads (default: 20)
   ALLOWED_ORIGIN          — CORS origin for HTTP responses
-  AWS_LAMBDA_FUNCTION_NAME — injected automatically by Lambda runtime;
-                             used to self-invoke in async mode
 """
 
 from __future__ import annotations
@@ -47,30 +44,30 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
 from botocore.config import Config
 
-# ai_extractor.py lives alongside this file in the same Lambda zip.
-# It handles: page chunking, Nova Lite prompt building, response parsing,
-# entity validation.
 from ai_extractor import extract_chunk, page_chunks
 
 LOGGER = logging.getLogger(__name__)
 
-# ── DynamoDB table names (overridable via env vars) ──────────────────────────
-OCR_TABLE_NAME              = "jrf-task-ocr-DocumentOCR"
+# ── Config ────────────────────────────────────────────────────────────────────
+AWS_REGION       = os.environ.get("AWS_REGION", "ap-southeast-2")
+MODEL_ID         = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
+MAX_CHUNK_CHARS  = int(os.environ.get("MAX_CHUNK_CHARS", "1500"))
+# 20 parallel workers saturates Bedrock throughput without hitting throttle limits.
+# Reduce if you see ThrottlingException in logs.
+PARALLEL_WORKERS = int(os.environ.get("PARALLEL_WORKERS", "20"))
+
+OCR_TABLE_NAME               = "jrf-task-ocr-DocumentOCR"
 EXTRACTED_RECORDS_TABLE_NAME = "jrf-task-ocr-ExtractedRecords"
-TAXONOMY_TABLE_NAME         = "jrf-task-data-EntityTaxonomy"
+TAXONOMY_TABLE_NAME          = "jrf-task-data-EntityTaxonomy"
 
-# ── Runtime config ────────────────────────────────────────────────────────────
-AWS_REGION     = os.environ.get("AWS_REGION", "ap-southeast-2")
-MODEL_ID       = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
-MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "1500"))
-
-# ── AWS clients (initialised once at cold-start) ──────────────────────────────
+# ── AWS clients (created once at cold-start, reused across invocations) ───────
 OCR_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("DYNAMO_TABLE", OCR_TABLE_NAME)
 )
@@ -82,223 +79,213 @@ TAXONOMY_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
 )
 s3 = boto3.client("s3", region_name=AWS_REGION)
 
-# Bedrock client with adaptive retry — Nova Lite can throttle on large docs
-bedrock = boto3.client(
-    "bedrock-runtime",
-    region_name=AWS_REGION,
-    config=Config(
-        retries={"mode": "adaptive", "total_max_attempts": 5},
-        connect_timeout=5,
-        read_timeout=60,
-    ),
-)
+# Each thread needs its own Bedrock client — boto3 clients are NOT thread-safe.
+# We create one per worker thread using a thread-local factory.
+import threading
+_bedrock_local = threading.local()
 
-# Lambda client used only to self-invoke in async worker mode
+def _get_bedrock():
+    """Return a thread-local Bedrock client (one per worker thread)."""
+    if not hasattr(_bedrock_local, "client"):
+        _bedrock_local.client = boto3.client(
+            "bedrock-runtime",
+            region_name=AWS_REGION,
+            config=Config(
+                retries={"mode": "adaptive", "total_max_attempts": 5},
+                connect_timeout=5,
+                read_timeout=60,
+            ),
+        )
+    return _bedrock_local.client
+
+
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ddb_safe(value):
-    """Recursively convert floats to Decimal so DynamoDB accepts them."""
+    """Recursively convert floats → Decimal so DynamoDB accepts them."""
     if isinstance(value, float):
         return Decimal(str(value))
     if isinstance(value, list):
-        return [_ddb_safe(item) for item in value]
+        return [_ddb_safe(i) for i in value]
     if isinstance(value, dict):
-        return {key: _ddb_safe(item) for key, item in value.items()}
+        return {k: _ddb_safe(v) for k, v in value.items()}
     return value
 
 
 def _bbox(bbox):
-    """
-    Convert Textract normalised bbox [left, top, right, bottom]
-    to [x, y, width, height] for storage.
-    Returns None if the input is invalid.
-    """
+    """Convert [left, top, right, bottom] → [x, y, width, height]. Returns None if invalid."""
     if not isinstance(bbox, list) or len(bbox) != 4:
         return None
     left, top, right, bottom = [float(v) for v in bbox]
     return [left, top, max(0.0, right - left), max(0.0, bottom - top)]
 
 
-def _put_entity(document_id, theme, entity_id, attributes):
-    """
-    Write one extracted entity record to jrf-task-ocr-ExtractedRecords.
-
-    Primary key:
-      id              = "DOC#{document_id}"   (partition key)
-      theme_entity_id = "{THEME}#{entity_id}" (sort key)
-
-    The top-level 'district' field is denormalised from spatial_units so
-    the GSI on 'district' can be queried directly.
-    """
-    item = {
-        "id": f"DOC#{document_id}",
-        "theme_entity_id": f"{theme.upper()}#{entity_id}",
-        "document_id": document_id,
-        "theme": theme,
-        **attributes,
-    }
-    # Denormalise district to top-level for GSI queries
-    district = (attributes.get("spatial_units") or {}).get("district")
-    if district:
-        item["district"] = district
-    else:
-        item.pop("district", None)
-
-    EXTRACTED_RECORDS_TABLE.put_item(Item=_ddb_safe(item))
-
-
 def _caption_for(figure, elements):
     """
     Find the nearest OCR text line on the same page that horizontally
-    overlaps the figure bounding box — used as the figure caption.
-    Returns an empty string if no candidate is found.
+    overlaps the figure bbox — used as the figure caption.
     """
     box = figure.get("bbox") or []
     if len(box) != 4:
         return ""
     left, top, right, bottom = box
     candidates = []
-    for element in elements:
-        if element.get("page", 1) != figure.get("page", 1):
+    for el in elements:
+        if el.get("page", 1) != figure.get("page", 1):
             continue
-        if len(element.get("bbox") or []) != 4:
+        if len(el.get("bbox") or []) != 4:
             continue
-        el_left, el_top, el_right, el_bottom = element["bbox"]
-        overlaps_x = el_right >= left and el_left <= right
-        # Only consider lines above or below the figure, not inside it
-        if overlaps_x and (el_bottom <= top or el_top >= bottom):
-            distance = min(abs(top - el_bottom), abs(el_top - bottom))
-            candidates.append((distance, element.get("text", "")))
+        el_left, el_top, el_right, el_bottom = el["bbox"]
+        if el_right >= left and el_left <= right:
+            if el_bottom <= top or el_top >= bottom:
+                dist = min(abs(top - el_bottom), abs(el_top - bottom))
+                candidates.append((dist, el.get("text", "")))
     return min(candidates, default=(0, ""), key=lambda c: c[0])[1]
 
 
 def _load_taxonomy():
-    """
-    Scan the entire EntityTaxonomy table and return all items sorted by
-    entity_key. Uses pagination to handle tables larger than 1 MB.
-    """
+    """Scan EntityTaxonomy table with pagination. Returns list sorted by entity_key."""
     items, kwargs = [], {}
     while True:
-        response = TAXONOMY_TABLE.scan(**kwargs)
-        items.extend(response.get("Items", []))
-        if "LastEvaluatedKey" not in response:
+        resp = TAXONOMY_TABLE.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
             break
-        kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
-    return sorted(items, key=lambda item: item.get("entity_key", ""))
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return sorted(items, key=lambda i: i.get("entity_key", ""))
 
 
-# ── Core extraction logic ─────────────────────────────────────────────────────
-
-def build_entities(document_id, ocr, taxonomy, bedrock_client=None):
+def _batch_write_records(items):
     """
-    Generator — yields (theme, entity_id, attributes) tuples for every
-    structured asset found in the OCR output:
-
-      1. Tables   — one record per Textract TABLE block
-      2. Figures  — one record per LAYOUT_FIGURE block (with caption)
-      3. Text facts — OCR lines are chunked by page and sent to Nova Lite;
-                      each validated fact becomes one record
-
-    All records start with review_status = "pending_review" so a human
-    must approve them before they are used downstream.
+    Write a list of DynamoDB items using batch_writer().
+    batch_writer() automatically handles:
+      - Splitting into 25-item batches (DynamoDB limit)
+      - Retrying unprocessed items
+    Much faster than individual put_item() calls.
     """
-    elements = ocr.get("elements", [])
-    bedrock_client = bedrock_client or bedrock
+    with EXTRACTED_RECORDS_TABLE.batch_writer() as batch:
+        for item in items:
+            batch.put_item(Item=_ddb_safe(item))
 
-    # ── 1. Tables ─────────────────────────────────────────────────────────────
-    for index, table in enumerate(ocr.get("tables", []), start=1):
-        page = int(table.get("page", 1))
-        yield "TABLES", f"P{page:02d}_T{index:03d}", {
-            "pdf_page_num":      page,
-            "original_page_num": page,
-            "entity_type":       "table",
-            "content_type":      "table",
-            "table_data":        table.get("rows", []),
-            "bbox":              _bbox(table.get("bbox")),
-            # Flatten rows to a single string for keyword search
-            "source_text_chunk": " | ".join(
-                " ".join(str(cell) for cell in row if cell)
-                for row in table.get("rows", [])
-            ),
-            "spatial_units":    {},
-            "temporal_period":  "",
-            "confidence_score": Decimal("1"),
-            "review_status":    "pending_review",
-            "custom_attributes": {},
+
+def _make_entity_item(document_id, theme, entity_id, attributes, filename, s3_bucket):
+    """
+    Build the DynamoDB item dict for one extracted entity.
+    Primary key: id = "DOC#{document_id}", theme_entity_id = "{THEME}#{entity_id}"
+    District is denormalised to top-level for GSI queries.
+    """
+    # Prefix S3 crop key with full bucket path
+    crop_key = attributes.get("s3_crop_url")
+    if crop_key and not crop_key.startswith("s3://"):
+        attributes = {**attributes, "s3_crop_url": f"s3://{s3_bucket}/{crop_key}"}
+
+    item = {
+        "id":               f"DOC#{document_id}",
+        "theme_entity_id":  f"{theme.upper()}#{entity_id}",
+        "document_id":      document_id,
+        "theme":            theme,
+        "filename":         filename,
+        **attributes,
+    }
+    district = (attributes.get("spatial_units") or {}).get("district")
+    if district:
+        item["district"] = district
+    else:
+        item.pop("district", None)
+    return item
+
+
+# ── Parallel Nova Lite extraction ─────────────────────────────────────────────
+
+def _process_chunk(chunk, taxonomy, model_id):
+    """
+    Worker function — runs in a thread pool.
+    Calls Nova Lite for one OCR chunk and returns (chunk, facts) or (chunk, []).
+    Errors are caught so one bad chunk never kills the whole document.
+    """
+    try:
+        facts = extract_chunk(chunk, taxonomy, _get_bedrock(), model_id)
+        return chunk, facts
+    except Exception as exc:
+        LOGGER.warning("Chunk p%s c%s failed: %s", chunk.get("page"), chunk.get("chunk_index"), exc)
+        return chunk, []
+
+
+def _extract_text_facts_parallel(elements, taxonomy, model_id):
+    """
+    Run all OCR chunks through Nova Lite in parallel using ThreadPoolExecutor.
+
+    Why threads (not processes)?
+      - Nova Lite calls are I/O-bound (network wait), not CPU-bound.
+      - Threads share memory (taxonomy, config) with zero copy overhead.
+      - Python's GIL doesn't matter here — threads release it during I/O.
+
+    Returns a list of (theme, entity_id, attributes) tuples.
+    """
+    chunks = list(page_chunks(elements, MAX_CHUNK_CHARS))
+    total  = len(chunks)
+    LOGGER.info("Starting parallel extraction: %d chunks, %d workers", total, PARALLEL_WORKERS)
+
+    results = []  # list of (theme, entity_id, attributes)
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+        # Submit all chunks to the thread pool at once
+        futures = {
+            pool.submit(_process_chunk, chunk, taxonomy, model_id): chunk
+            for chunk in chunks
         }
+        completed = 0
+        for future in as_completed(futures):
+            chunk, facts = future.result()
+            completed += 1
+            if completed % 50 == 0:
+                # Progress log every 50 chunks so CloudWatch shows activity
+                LOGGER.info("Progress: %d/%d chunks done", completed, total)
+            for fact_index, fact in enumerate(facts, start=1):
+                entity_id = f"P{chunk['page']:02d}_C{chunk['chunk_index']:03d}_F{fact_index:02d}"
+                results.append((fact["theme"], entity_id, {
+                    "pdf_page_num":      chunk["page"],
+                    "original_page_num": chunk["page"],
+                    "entity_type":       "thematic_fact",
+                    "content_type":      "narrative_text",
+                    "extracted_fact":    fact["extracted_fact"],
+                    "source_text_chunk": chunk["text"],
+                    "spatial_units":     fact["spatial_units"],
+                    "temporal_period":   fact["temporal_period"],
+                    "bbox":              _bbox(chunk.get("bbox")),
+                    "confidence_score":  _ddb_safe(fact["confidence_score"]),
+                    "review_status":     "pending_review",
+                    "custom_attributes": {},
+                }))
 
-    # ── 2. Figures ────────────────────────────────────────────────────────────
-    for index, figure in enumerate(ocr.get("figures", []), start=1):
-        page = int(figure.get("page", 1))
-        caption = _caption_for(figure, elements)
-        yield "FIGURES", f"P{page:02d}_F{index:03d}", {
-            "pdf_page_num":      page,
-            "original_page_num": page,
-            "entity_type":       "figure",
-            "content_type":      "figure_crop",
-            "extracted_fact":    caption,
-            "source_text_chunk": caption,
-            # S3 key of the cropped PNG saved by lambda_starter
-            "s3_crop_url":       figure.get("image_s3_key", ""),
-            "bbox":              _bbox(figure.get("bbox")),
-            "crop_status":       figure.get("crop_status", "pending"),
-            "spatial_units":    {},
-            "temporal_period":  "",
-            "confidence_score": Decimal("1"),
-            "review_status":    "pending_review",
-            "custom_attributes": {},
-        }
+    LOGGER.info("Parallel extraction done: %d facts from %d chunks", len(results), total)
+    return results
 
-    # ── 3. Nova Lite text facts ───────────────────────────────────────────────
-    # page_chunks() groups OCR lines into ≤MAX_CHUNK_CHARS batches per page.
-    # extract_chunk() sends each batch to Nova Lite and returns validated facts.
-    for chunk in page_chunks(elements, MAX_CHUNK_CHARS):
-        extracted = extract_chunk(chunk, taxonomy, bedrock_client, MODEL_ID)
-        for fact_index, fact in enumerate(extracted, start=1):
-            # Entity ID encodes page, chunk, and fact position for traceability
-            entity_id = f"P{chunk['page']:02d}_C{chunk['chunk_index']:03d}_F{fact_index:02d}"
-            yield fact["theme"], entity_id, {
-                "pdf_page_num":      chunk["page"],
-                "original_page_num": chunk["page"],
-                "entity_type":       "thematic_fact",
-                "content_type":      "narrative_text",
-                "extracted_fact":    fact["extracted_fact"],
-                "source_text_chunk": chunk["text"],   # raw OCR text that produced this fact
-                "spatial_units":     fact["spatial_units"],
-                "temporal_period":   fact["temporal_period"],
-                "bbox":              _bbox(chunk.get("bbox")),
-                "confidence_score":  _ddb_safe(fact["confidence_score"]),
-                "review_status":     "pending_review",
-                "custom_attributes": {},
-            }
 
+# ── Core ingestion pipeline ───────────────────────────────────────────────────
 
 def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
     """
-    Full ingestion pipeline for one document:
-
+    Full ingestion pipeline:
       1. Load ocr.json from S3
-      2. Mark DocumentOCR record as ingestion_status = "processing"
-      3. Load active taxonomy from DynamoDB
-      4. Run build_entities() — tables, figures, Nova Lite facts
-      5. Write every entity to ExtractedRecords
-      6. Update DocumentOCR with final counts and status
-
-    Returns a summary dict with counts and final ingestion_status.
-    Raises on any unrecoverable error (caller marks status = "failed").
+      2. Mark DocumentOCR as processing
+      3. Load taxonomy
+      4. Extract tables + figures (instant, no AI needed)
+      5. Extract text facts in PARALLEL via Nova Lite
+      6. Batch-write all records to DynamoDB
+      7. Update DocumentOCR with final status + counts
     """
-    # Load the OCR JSON that lambda_starter wrote to S3
+    LOGGER.info("ingest_document start: doc=%s bucket=%s key=%s", document_id, s3_bucket, ocr_s3_key)
+
     payload = s3.get_object(Bucket=s3_bucket, Key=ocr_s3_key)["Body"].read()
-    ocr = json.loads(payload)
+    ocr     = json.loads(payload)
 
     filename      = ocr.get("filename", "")
     document_name = filename or document_id
-
-    # Read existing metadata so we can preserve created_at if already set
-    existing_metadata = OCR_TABLE.get_item(Key={"document_id": document_id}).get("Item", {})
+    existing      = OCR_TABLE.get_item(Key={"document_id": document_id}).get("Item", {})
 
     counts = {
         "text_blocks_count":    len(ocr.get("elements", [])),
@@ -306,30 +293,33 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
         "table_count":          len(ocr.get("tables", [])),
         "figure_count":         len(ocr.get("figures", [])),
     }
+    LOGGER.info("OCR loaded: pages=%s blocks=%s tables=%s figures=%s",
+                ocr.get("total_pages"), counts["text_blocks_count"],
+                counts["table_count"], counts["figure_count"])
 
-    # Mark as processing so the frontend shows a spinner
+    # Mark as processing in DynamoDB
     OCR_TABLE.update_item(
         Key={"document_id": document_id},
         UpdateExpression=(
-            "SET record_type = :record_type, document_name = :name, total_pages = :pages, "
-            "text_blocks_count = :text_count, layout_regions_count = :layout_count, "
-            "table_count = :table_count, figure_count = :figure_count, "
-            "s3_ocr_json_url = :ocr_url, created_at = if_not_exists(created_at, :created_at), "
+            "SET record_type = :rt, document_name = :name, total_pages = :pages, "
+            "text_blocks_count = :tc, layout_regions_count = :lc, "
+            "table_count = :tbl, figure_count = :fig, "
+            "s3_ocr_json_url = :url, created_at = if_not_exists(created_at, :ca), "
             "ingestion_status = :status"
         ),
         ExpressionAttributeValues={
-            ":record_type":  "METADATA",
-            ":name":         document_name,
-            ":pages":        int(ocr.get("total_pages", 0)),
-            ":text_count":   counts["text_blocks_count"],
-            ":layout_count": counts["layout_regions_count"],
-            ":table_count":  counts["table_count"],
-            ":figure_count": counts["figure_count"],
-            ":ocr_url":      s3_ocr_json_url or f"s3://{s3_bucket}/{ocr_s3_key}",
-            ":created_at": (
+            ":rt":     "METADATA",
+            ":name":   document_name,
+            ":pages":  int(ocr.get("total_pages", 0)),
+            ":tc":     counts["text_blocks_count"],
+            ":lc":     counts["layout_regions_count"],
+            ":tbl":    counts["table_count"],
+            ":fig":    counts["figure_count"],
+            ":url":    s3_ocr_json_url or f"s3://{s3_bucket}/{ocr_s3_key}",
+            ":ca": (
                 ocr.get("processed_timestamp")
                 or ocr.get("uploaded_at")
-                or existing_metadata.get("uploaded_at")
+                or existing.get("uploaded_at")
                 or datetime.now(timezone.utc).isoformat()
             ),
             ":status": "processing",
@@ -338,42 +328,86 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
 
     try:
         taxonomy = _load_taxonomy()
-        staged_records = list(build_entities(document_id, ocr, taxonomy))
+        elements = ocr.get("elements", [])
+        all_records = []  # accumulate all (theme, entity_id, attributes) here
 
-        for theme, entity_id, attributes in staged_records:
-            # Prefix the S3 crop key with the full bucket path before storing
-            crop_key = attributes.get("s3_crop_url")
-            if crop_key:
-                attributes["s3_crop_url"] = f"s3://{s3_bucket}/{crop_key}"
-            _put_entity(document_id, theme, entity_id, {"filename": filename, **attributes})
+        # ── 1. Tables (no AI — instant) ───────────────────────────────────────
+        for idx, table in enumerate(ocr.get("tables", []), start=1):
+            page = int(table.get("page", 1))
+            all_records.append(("TABLES", f"P{page:02d}_T{idx:03d}", {
+                "pdf_page_num":      page,
+                "original_page_num": page,
+                "entity_type":       "table",
+                "content_type":      "table",
+                "table_data":        table.get("rows", []),
+                "bbox":              _bbox(table.get("bbox")),
+                "source_text_chunk": " | ".join(
+                    " ".join(str(c) for c in row if c)
+                    for row in table.get("rows", [])
+                ),
+                "spatial_units":    {},
+                "temporal_period":  "",
+                "confidence_score": Decimal("1"),
+                "review_status":    "pending_review",
+                "custom_attributes": {},
+            }))
+
+        # ── 2. Figures (no AI — instant) ──────────────────────────────────────
+        for idx, figure in enumerate(ocr.get("figures", []), start=1):
+            page    = int(figure.get("page", 1))
+            caption = _caption_for(figure, elements)
+            all_records.append(("FIGURES", f"P{page:02d}_F{idx:03d}", {
+                "pdf_page_num":      page,
+                "original_page_num": page,
+                "entity_type":       "figure",
+                "content_type":      "figure_crop",
+                "extracted_fact":    caption,
+                "source_text_chunk": caption,
+                "s3_crop_url":       figure.get("image_s3_key", ""),
+                "bbox":              _bbox(figure.get("bbox")),
+                "crop_status":       figure.get("crop_status", "pending"),
+                "spatial_units":    {},
+                "temporal_period":  "",
+                "confidence_score": Decimal("1"),
+                "review_status":    "pending_review",
+                "custom_attributes": {},
+            }))
+
+        # ── 3. Text facts — PARALLEL Nova Lite calls ──────────────────────────
+        text_facts = _extract_text_facts_parallel(elements, taxonomy, MODEL_ID)
+        all_records.extend(text_facts)
+
+        # ── 4. Batch-write everything to DynamoDB ─────────────────────────────
+        # Build item dicts first, then write in one batch_writer pass
+        items = [
+            _make_entity_item(document_id, theme, entity_id, attrs, filename, s3_bucket)
+            for theme, entity_id, attrs in all_records
+        ]
+        LOGGER.info("Writing %d records to DynamoDB via batch_writer", len(items))
+        _batch_write_records(items)
 
     except Exception as error:
-        # Write the error message to DynamoDB so the frontend can surface it
         OCR_TABLE.update_item(
             Key={"document_id": document_id},
-            UpdateExpression="SET ingestion_status = :status, ingestion_error = :error",
-            ExpressionAttributeValues={":status": "failed", ":error": str(error)[:500]},
+            UpdateExpression="SET ingestion_status = :s, ingestion_error = :e",
+            ExpressionAttributeValues={":s": "failed", ":e": str(error)[:500]},
         )
         raise
 
-    written = len(staged_records)
-    # If records were staged, status = "pending_review" (human must approve).
-    # If nothing was extracted (e.g. blank doc), status = "completed".
+    written          = len(all_records)
     ingestion_status = "pending_review" if written else "completed"
 
     OCR_TABLE.update_item(
         Key={"document_id": document_id},
         UpdateExpression=(
-            "SET ingestion_status = :status, extracted_entity_count = :count, "
-            "pending_review_count = :pending_count REMOVE ingestion_error"
+            "SET ingestion_status = :s, extracted_entity_count = :c, "
+            "pending_review_count = :p REMOVE ingestion_error"
         ),
-        ExpressionAttributeValues={
-            ":status":        ingestion_status,
-            ":count":         written,
-            ":pending_count": written,
-        },
+        ExpressionAttributeValues={":s": ingestion_status, ":c": written, ":p": written},
     )
 
+    LOGGER.info("ingest_document done: doc=%s written=%d status=%s",
+                document_id, written, ingestion_status)
     return {
         "document_id": document_id,
         **counts,
@@ -385,7 +419,7 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
 # ── HTTP response helper ──────────────────────────────────────────────────────
 
 def _response(status_code, payload):
-    """Build an API Gateway-compatible HTTP response with CORS headers."""
+    """Build an API Gateway HTTP response with CORS headers."""
     return {
         "statusCode": status_code,
         "headers": {
@@ -402,20 +436,16 @@ def _response(status_code, payload):
 
 def lambda_handler(event, context):
     """
-    Entry point — handler: lambda_function.lambda_handler
+    Dual-mode entry point — handler: lambda_function.lambda_handler
 
-    Dual-mode execution:
-
-    Mode A — Async worker (self-invoked by Mode B):
+    Mode A — Async worker (self-invoked):
       event = {"async_worker": True, "document_id": "..."}
-      Runs the full ingest_document() pipeline synchronously.
-      No HTTP response is returned (fire-and-forget invocation).
+      Runs ingest_document() with parallel Nova Lite extraction.
+      No HTTP response returned.
 
     Mode B — HTTP trigger (API Gateway POST /api/documents/ingest-dynamo):
-      event = standard API Gateway v2 proxy event
-      Validates the document, sets status = "processing", then
-      self-invokes this same function asynchronously (Mode A) and
-      immediately returns HTTP 202 so the browser doesn't time out.
+      Validates doc → marks processing → self-invokes Mode A → returns 202.
+      Frontend polls GET /document/{id} watching ingestion_status.
     """
 
     # ── Mode A: async worker ──────────────────────────────────────────────────
@@ -435,10 +465,10 @@ def lambda_handler(event, context):
             LOGGER.exception("Async ingestion failed for %s", document_id)
             OCR_TABLE.update_item(
                 Key={"document_id": document_id},
-                UpdateExpression="SET ingestion_status = :status, ingestion_error = :error",
-                ExpressionAttributeValues={":status": "failed", ":error": str(error)[:500]},
+                UpdateExpression="SET ingestion_status = :s, ingestion_error = :e",
+                ExpressionAttributeValues={":s": "failed", ":e": str(error)[:500]},
             )
-        return  # No HTTP response for async invocations
+        return  # no HTTP response for async invocations
 
     # ── Mode B: HTTP trigger ──────────────────────────────────────────────────
     method = (event.get("requestContext") or {}).get("http", {}).get("method", "").upper()
@@ -446,7 +476,6 @@ def lambda_handler(event, context):
         return _response(200, {})
 
     try:
-        # Parse request body (may be base64-encoded by API Gateway)
         body = event.get("body") or "{}"
         if event.get("isBase64Encoded"):
             import base64
@@ -457,45 +486,37 @@ def lambda_handler(event, context):
         if not document_id:
             return _response(400, {"detail": "document_id is required"})
 
-        # Verify the document exists in DynamoDB
         item = OCR_TABLE.get_item(Key={"document_id": document_id}).get("Item")
         if not item:
             return _response(404, {"detail": "Document not found"})
-
-        # OCR must be complete before we can ingest
         if item.get("status") != "completed" or not item.get("ocr_s3_key"):
             return _response(409, {"detail": "OCR processing is not complete"})
-
-        # Prevent duplicate concurrent ingestion runs
         if item.get("ingestion_status") == "processing":
             return _response(409, {"detail": "Entity extraction is already running"})
 
-        # Atomically mark as processing (conditional write prevents race conditions)
+        # Atomic conditional write — prevents two simultaneous ingestion runs
         OCR_TABLE.update_item(
             Key={"document_id": document_id},
-            UpdateExpression="SET ingestion_status = :status REMOVE ingestion_error",
-            ConditionExpression="attribute_not_exists(ingestion_status) OR ingestion_status <> :status",
-            ExpressionAttributeValues={":status": "processing"},
+            UpdateExpression="SET ingestion_status = :s REMOVE ingestion_error",
+            ConditionExpression="attribute_not_exists(ingestion_status) OR ingestion_status <> :s",
+            ExpressionAttributeValues={":s": "processing"},
         )
 
-        # Self-invoke asynchronously so this HTTP call returns immediately.
-        # AWS_LAMBDA_FUNCTION_NAME is injected automatically by the Lambda runtime.
+        # Self-invoke asynchronously — HTTP response returns immediately
         try:
             lambda_client.invoke(
                 FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
-                InvocationType="Event",   # fire-and-forget
-                Payload=json.dumps({"async_worker": True, "document_id": document_id}).encode("utf-8"),
+                InvocationType="Event",  # fire-and-forget
+                Payload=json.dumps({"async_worker": True, "document_id": document_id}).encode(),
             )
         except Exception:
-            # Roll back status if we couldn't launch the async worker
             OCR_TABLE.update_item(
                 Key={"document_id": document_id},
-                UpdateExpression="SET ingestion_status = :status",
-                ExpressionAttributeValues={":status": "failed"},
+                UpdateExpression="SET ingestion_status = :s",
+                ExpressionAttributeValues={":s": "failed"},
             )
             raise
 
-        # Return 202 immediately — frontend polls /document/{id} for status
         return _response(202, {
             "document_id":      document_id,
             "ingestion_status": "processing",
