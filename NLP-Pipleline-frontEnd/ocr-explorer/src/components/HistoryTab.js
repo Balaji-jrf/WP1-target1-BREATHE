@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchDocuments, fetchDocument, downloadOcrJson } from '../api';
+import DocViewer from './DocViewer';
 import Modal from './Modal';
 import OcrResults from './OcrResults';
 
@@ -67,42 +68,33 @@ const COMPARE_MIN = { w: 520, h: 340 };
 const COMPARE_DEFAULT = { w: Math.min(1100, window.innerWidth - 48), h: Math.min(680, window.innerHeight - 80) };
 
 function CompareView({ item, docUrl, onClose }) {
-  const isPdf = /\.pdf$/i.test(item?.filename || '');
-  const pages = Array.from(new Set((item.elements || []).map((element) => element.page || 1)))
-    .sort((first, second) => first - second);
-  const [selectedPage, setSelectedPage] = useState(pages[0] || 1);
-  const pageDocumentUrl = isPdf && docUrl
-    ? `${docUrl.split('#')[0]}#page=${selectedPage}&toolbar=0&navpanes=0`
-    : docUrl;
+  const [activeElement, setActiveElement] = useState(null);
 
   // size & position state
   const [size, setSize] = useState(COMPARE_DEFAULT);
-  const [pos, setPos] = useState({
-    x: Math.round((window.innerWidth - COMPARE_DEFAULT.w) / 2),
+  const [pos, setPos]   = useState({
+    x: Math.round((window.innerWidth  - COMPARE_DEFAULT.w) / 2),
     y: Math.round((window.innerHeight - COMPARE_DEFAULT.h) / 2),
   });
 
   // drag-to-move
   const dragRef = useRef(null);
   const onDragMouseDown = (e) => {
-    if (e.target.closest('button,a,iframe')) return;
+    if (e.target.closest('button,a,iframe,canvas')) return;
     e.preventDefault();
     const startX = e.clientX - pos.x;
     const startY = e.clientY - pos.y;
     const onMove = (ev) => setPos({ x: ev.clientX - startX, y: ev.clientY - startY });
-    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    const onUp   = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   };
 
-  // resize handle (bottom-right corner)
+  // resize handle
   const onResizeMouseDown = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startW = size.w;
-    const startH = size.h;
+    const startX = e.clientX, startY = e.clientY, startW = size.w, startH = size.h;
     const onMove = (ev) => setSize({
       w: Math.max(COMPARE_MIN.w, startW + ev.clientX - startX),
       h: Math.max(COMPARE_MIN.h, startH + ev.clientY - startY),
@@ -110,6 +102,10 @@ function CompareView({ item, docUrl, onClose }) {
     const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  };
+
+  const handleElementClick = (element) => {
+    setActiveElement(element);
   };
 
   return (
@@ -132,46 +128,42 @@ function CompareView({ item, docUrl, onClose }) {
             <button className="modal-close" onClick={onClose}>✕</button>
           </div>
         </div>
+
         <div className="compare-body">
-          <div className="compare-pane">
+          {/* Left pane — OCR results */}
+          <div className="compare-pane compare-pane-ocr">
             <div className="compare-pane-label">
-              <span>Original Document</span>
-              {isPdf && (
-                <label className="compare-page-control">
-                  <span>Page</span>
-                  <select
-                    aria-label="Document page"
-                    value={selectedPage}
-                    onChange={(event) => {
-                      setSelectedPage(Number(event.target.value));
-                    }}
-                  >
-                    {Array.from({ length: Number(item.total_pages) || pages.length || 1 }, (_, index) => (
-                      <option key={index + 1} value={index + 1}>Page {index + 1}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
+              <span>OCR Extraction</span>
+              <span className="compare-page-hint">Click any card to highlight in document →</span>
             </div>
-            {docUrl
-              ? isPdf
-                ? <iframe key={selectedPage} src={pageDocumentUrl} title={`Document page ${selectedPage}`} className="compare-iframe" />
-                : <img src={docUrl} alt={item.filename} className="compare-img" />
-              : <div className="compare-no-doc">No document URL available</div>
-            }
-          </div>
-          <div className="compare-pane">
             <div className="compare-ocr-scroll compare-ocr-explorer">
               <OcrResults
                 result={item}
-                pageFilter={String(selectedPage)}
-                onPageFilterChange={(page) => {
-                  setSelectedPage(Number(page));
-                }}
+                onElementClick={handleElementClick}
+                activeElement={activeElement}
+              />
+            </div>
+          </div>
+
+          {/* Right pane — DocViewer with bbox highlight */}
+          <div className="compare-pane compare-pane-doc">
+            <div className="compare-pane-label">
+              <span>Document Viewer</span>
+              {activeElement && (
+                <span className="compare-page-hint">
+                  Page {activeElement.page} · {activeElement.type}
+                </span>
+              )}
+            </div>
+            <div className="compare-docviewer-wrap">
+              <DocViewer
+                element={activeElement}
+                onClose={() => setActiveElement(null)}
               />
             </div>
           </div>
         </div>
+
         <div className="compare-resize-handle" onMouseDown={onResizeMouseDown} title="Drag to resize" />
       </div>
     </div>

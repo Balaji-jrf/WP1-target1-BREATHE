@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import DocViewer from './DocViewer';
 import Modal from './Modal';
 import OcrResults from './OcrResults';
 
@@ -60,6 +61,8 @@ function ResultActions({ result, docUrl }) {
 }
 
 export default function ResultPanel({ result, docUrl, kicker }) {
+  const [activeElement, setActiveElement] = useState(null);
+
   if (!result) return null;
 
   return (
@@ -76,27 +79,28 @@ export default function ResultPanel({ result, docUrl, kicker }) {
         </div>
       </div>
 
-      {docUrl && (
-        <div className="doc-viewer">
-          <div className="doc-viewer-bar">
-            <span className="section-kicker">Original document</span>
-            <a href={docUrl} target="_blank" rel="noreferrer" className="doc-open-btn">Open in new tab ↗</a>
-          </div>
-          {/\.pdf$/i.test(result.filename)
-            ? <iframe src={docUrl} title="Document preview" className="doc-iframe" />
-            : <img src={docUrl} alt={result.filename} className="doc-img" />
-          }
+      {/* ── Side-by-side: OCR left, DocViewer right ── */}
+      <div className="results-split-layout">
+        <div className="results-split-ocr">
+          <OcrResults
+            result={result}
+            onElementClick={setActiveElement}
+            activeElement={activeElement}
+          />
+          <details className="json-details">
+            <summary>View raw JSON payload <span>+</span></summary>
+            <pre>{JSON.stringify(result, null, 2)}</pre>
+          </details>
+          <ResultActions result={result} docUrl={docUrl} />
         </div>
-      )}
 
-      <OcrResults result={result} />
-
-      <details className="json-details">
-        <summary>View raw JSON payload <span>+</span></summary>
-        <pre>{JSON.stringify(result, null, 2)}</pre>
-      </details>
-
-      <ResultActions result={result} docUrl={docUrl} />
+        <div className="results-split-viewer">
+          <DocViewer
+            element={activeElement}
+            onClose={() => setActiveElement(null)}
+          />
+        </div>
+      </div>
     </section>
   );
 }
