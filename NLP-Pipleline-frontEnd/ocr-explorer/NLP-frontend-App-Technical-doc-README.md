@@ -1,70 +1,35 @@
-# Getting Started with Create React App
+# OCR Explorer · Technical Notes
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+This Create React App frontend is the user interface for the BREATHE document archive.
+The `src/api.js` module handles upload, polling, OCR retrieval, metadata, facts, and
+document operations. `App.js` controls the tabs; `AuthContext.js` provides login state
+and tab access; each tab lives in `src/components/`.
 
-## Available Scripts
+## User and data flow
 
-In the project directory, you can run:
+1. The browser asks `GET /upload-url?filename=...` for a document ID and short-lived
+   S3 upload URL.
+2. The browser uploads the file directly to S3. The S3 upload event starts OCR.
+3. The app polls `GET /document/{document_id}`. When OCR completes, it fetches OCR JSON
+   from the returned presigned S3 URL.
+4. The History view reads `GET /documents`. Document tags are loaded from each
+   document's `doc_tag` and filtered in the browser.
+5. The Database view uses `/api/documents/{document_id}/records` to view and edit
+   facts. The page number is a PDF page within the selected document.
+6. AI facts use the active DynamoDB taxonomy; users can edit, approve, or remove facts.
+7. Admins may delete a document through `DELETE /document/{document_id}`. The API
+   verifies the signed token and current admin role before removing stored data.
 
-### `npm start`
+## Interface details
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+Tag dropdowns share `src/documentTags.js`. `AtlasTab.js` describes the planned Atlas
+workflow; it does not display a live map. The Database list and PDF panes use accessible
+resize handles. OCR Compare can resize both the dialog and its side-by-side panes.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+Tab permissions control navigation in the UI. API permissions must also be enforced on
+the server; currently, the document delete route has a server-side admin check, while
+other retrieval routes retain their existing access behavior.
 
-### `npm test`
-
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
-
-### `npm run build`
-
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
-
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+For table schemas, API routes, and the future map design, see the repository
+[system guide](../../SYSTEM-GUIDE.md). For local setup, see the
+[frontend README](../NLP-Pipeline-Work-README.md).

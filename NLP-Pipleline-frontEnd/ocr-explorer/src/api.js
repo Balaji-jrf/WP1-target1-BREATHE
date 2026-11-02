@@ -1,6 +1,14 @@
 const API_URL = process.env.REACT_APP_API_URL
   || 'https://o0dqnexpsg.execute-api.ap-southeast-2.amazonaws.com/prod';
 
+function _authHeader() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('breathe_auth'));
+    if (stored?.token) return { Authorization: `Bearer ${stored.token}` };
+  } catch { /* ignore */ }
+  return {};
+}
+
 const log = (step, msg, data) => {
   const ts = new Date().toISOString().split('T')[1].slice(0, 12);
   if (data !== undefined) console.log(`[OCR ${ts}] [${step}]`, msg, data);
@@ -32,7 +40,7 @@ export async function uploadDocument(file, onStatus) {
   // 1. Get presigned S3 upload URL
   onStatus?.('Preparing upload…');
   log('STEP-1', `GET ${API_URL}/upload-url?filename=${file.name}`);
-  const urlRes  = await fetch(`${API_URL}/upload-url?filename=${encodeURIComponent(file.name)}`);
+  const urlRes  = await fetch(`${API_URL}/upload-url?filename=${encodeURIComponent(file.name)}`, { headers: _authHeader() });
   const urlData = await urlRes.json();
   log('STEP-1', `response status=${urlRes.status}`, { document_id: urlData.document_id, content_type: urlData.content_type });
   if (!urlRes.ok) throw new Error(urlData.detail || 'Failed to get upload URL.');
@@ -68,7 +76,7 @@ async function pollUntilDone(document_id, onStatus, intervalMs = 5000, maxAttemp
 
     let res, data;
     try {
-      res  = await fetch(`${API_URL}/document/${document_id}`);
+      res  = await fetch(`${API_URL}/document/${document_id}`, { headers: _authHeader() });
       data = await res.json();
     } catch (err) {
       log('POLL', `attempt ${i + 1} network error — ${err.message} — retrying`);
@@ -129,14 +137,14 @@ async function pollUntilDone(document_id, onStatus, intervalMs = 5000, maxAttemp
 }
 
 export async function fetchDocuments() {
-  const res  = await fetch(`${API_URL}/documents`);
+  const res  = await fetch(`${API_URL}/documents`, { headers: _authHeader() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to load history');
   return data.documents || [];
 }
 
 export async function fetchDocument(document_id) {
-  const res  = await fetch(`${API_URL}/document/${document_id}`);
+  const res  = await fetch(`${API_URL}/document/${document_id}`, { headers: _authHeader() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to fetch document.');
 
@@ -161,7 +169,7 @@ export async function fetchDocument(document_id) {
 }
 
 export async function downloadOcrJson(document_id) {
-  const res  = await fetch(`${API_URL}/document/${document_id}`);
+  const res  = await fetch(`${API_URL}/document/${document_id}`, { headers: _authHeader() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to fetch document.');
 
@@ -198,7 +206,7 @@ export async function fetchDocumentRecordsPage(document_id, filters = {}, cursor
   params.set('limit', '10');
   if (cursor) params.set('cursor', cursor);
   const suffix = params.size ? `?${params.toString()}` : '';
-  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records${suffix}`);
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records${suffix}`, { headers: _authHeader() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to load document records.');
   return { records: data.records || [], nextToken: data.next_token || '' };
@@ -216,7 +224,7 @@ export async function fetchDocumentRecords(document_id, filters = {}) {
 }
 
 export async function fetchTaxonomy() {
-  const res = await fetch(`${API_URL}/api/database/taxonomy`);
+  const res = await fetch(`${API_URL}/api/database/taxonomy`, { headers: _authHeader() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Failed to load entity taxonomy.');
   return data.taxonomy || [];
@@ -225,7 +233,7 @@ export async function fetchTaxonomy() {
 export async function saveTaxonomy(entry) {
   const res = await fetch(`${API_URL}/api/database/taxonomy`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ..._authHeader() },
     body: JSON.stringify(entry),
   });
   const data = await res.json();
@@ -236,6 +244,7 @@ export async function saveTaxonomy(entry) {
 export async function deleteTaxonomy(entity_key) {
   const res = await fetch(`${API_URL}/api/database/taxonomy/${encodeURIComponent(entity_key)}`, {
     method: 'DELETE',
+    headers: _authHeader(),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Could not delete taxonomy entry.');
@@ -247,7 +256,7 @@ export async function updateDocumentRecord(document_id, theme_entity_id, attribu
     `${API_URL}/api/documents/${encodeURIComponent(document_id)}/records/${encodeURIComponent(theme_entity_id)}`,
     {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ..._authHeader() },
       body: JSON.stringify({ attributes }),
     },
   );
@@ -256,11 +265,11 @@ export async function updateDocumentRecord(document_id, theme_entity_id, attribu
   return data.record;
 }
 
-export async function ingestDocumentToDatabase(document_id) {
+export async function ingestDocumentToDatabase(document_id, model_id) {
   const res = await fetch(`${API_URL}/api/documents/ingest-dynamo`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ document_id }),
+    headers: { 'Content-Type': 'application/json', ..._authHeader() },
+    body: JSON.stringify({ document_id, model_id }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Database ingestion failed.');
@@ -270,7 +279,7 @@ export async function ingestDocumentToDatabase(document_id) {
 export async function createDocumentRecord(document_id, record) {
   const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ..._authHeader() },
     body: JSON.stringify(record),
   });
   const data = await res.json();
@@ -281,27 +290,59 @@ export async function createDocumentRecord(document_id, record) {
 export async function deleteDocumentRecord(document_id, theme_entity_id) {
   const res = await fetch(
     `${API_URL}/api/documents/${encodeURIComponent(document_id)}/records/${encodeURIComponent(theme_entity_id)}`,
-    { method: 'DELETE' },
+    { method: 'DELETE', headers: _authHeader() },
   );
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Could not delete document record.');
   return data;
 }
 
-export async function approveDocumentRecords(document_id, approved_entity_ids) {
+export async function approveDocumentRecords(document_id, approved_entity_ids, options = {}) {
   const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approved_entity_ids }),
+    headers: { 'Content-Type': 'application/json', ..._authHeader() },
+    body: JSON.stringify(options.approveAll ? { approve_all: true } : { approved_entity_ids }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Could not approve document records.');
   return data;
 }
 
+export async function deleteDocument(document_id) {
+  const res = await fetch(`${API_URL}/document/${encodeURIComponent(document_id)}`, {
+    method: 'DELETE',
+    headers: _authHeader(),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not delete document.');
+  return data;
+}
+
+export async function saveDocumentMeta(document_id, meta) {
+  const res = await fetch(`${API_URL}/document/${encodeURIComponent(document_id)}/meta`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ..._authHeader() },
+    body: JSON.stringify(meta),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not save document metadata.');
+  return data;
+}
+
 export async function fetchIngestionStatus(document_id) {
-  const res = await fetch(`${API_URL}/document/${encodeURIComponent(document_id)}`);
+  const res = await fetch(`${API_URL}/document/${encodeURIComponent(document_id)}`, { headers: _authHeader() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Could not check ingestion status.');
   return { status: data.ingestion_status, error: data.ingestion_error || '' };
+}
+
+export async function saveUserRecord(document_id, record) {
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(document_id)}/records`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ..._authHeader() },
+    body: JSON.stringify(record),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Could not save record.');
+  return data;
 }
