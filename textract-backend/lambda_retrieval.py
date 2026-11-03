@@ -332,11 +332,15 @@ def _update_record(document_id, theme_entity_id, body):
     allowed = {
         "theme", "entity_type", "content_type", "extracted_fact", "spatial_units",
         "temporal_period", "confidence_score", "source_text_chunk", "bbox",
-        "custom_attributes", "pdf_page_num", "original_page_num",
+        "custom_attributes", "pdf_page_num", "original_page_num", "geotag",
     }
     updates = {name: value for name, value in attributes.items() if name in allowed}
     if not updates:
         return 400, {"detail": "No editable record fields were provided"}
+    if "geotag" in updates:
+        validation_error = _validate_geotags(updates["geotag"])
+        if validation_error:
+            return 400, {"detail": validation_error}
     updated = {**current, **_ddb_safe(updates)}
     if "spatial_units" in updates:
         district = (updates.get("spatial_units") or {}).get("district")
@@ -346,6 +350,56 @@ def _update_record(document_id, theme_entity_id, body):
             updated.pop("district", None)
     records_table.put_item(Item=updated)
     return 200, {"saved": True, "record": updated}
+
+
+def _validate_geotags(geotags):
+    if not isinstance(geotags, list) or len(geotags) > 50:
+        return "geotag must be a list with no more than 50 places"
+    allowed_fields = {
+        "place_name", "place_type", "label", "latitude", "longitude",
+        "provider", "place_id", "relevance", "status", "updated_at",
+    }
+    for geotag in geotags:
+        if not isinstance(geotag, dict):
+            return "Each geotag must be an object"
+        if set(geotag) - allowed_fields:
+            return "Geotag contains unsupported fields"
+        place_name = geotag.get("place_name")
+        place_type = geotag.get("place_type")
+        if not isinstance(place_name, str) or not 1 <= len(place_name.strip()) <= 160:
+            return "Each geotag requires a place_name of at most 160 characters"
+        if not isinstance(place_type, str) or not 1 <= len(place_type.strip()) <= 60:
+            return "Each geotag requires a place_type of at most 60 characters"
+        if not isinstance(geotag.get("label"), str) or not 1 <= len(geotag["label"]) <= 300:
+            return "Each geotag requires a label of at most 300 characters"
+        if geotag.get("provider") != "Amazon Location Service":
+            return "Each geotag must identify Amazon Location Service as its provider"
+        if geotag.get("status") not in {"needs_review", "confirmed"}:
+            return "Geotag status must be needs_review or confirmed"
+        if not isinstance(geotag.get("updated_at"), str) or len(geotag["updated_at"]) > 80:
+            return "Each geotag requires an updated_at timestamp"
+        for field, minimum, maximum in (
+            ("latitude", -90, 90),
+            ("longitude", -180, 180),
+        ):
+            value = geotag.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+                return f"Geotag {field} must be a number"
+            if not minimum <= value <= maximum:
+                return f"Geotag {field} is out of range"
+        relevance = geotag.get("relevance")
+        if (
+            isinstance(relevance, bool)
+            or not isinstance(relevance, (int, float, Decimal))
+            or not 0 <= relevance <= 1
+        ):
+            return "Geotag relevance must be between 0 and 1"
+        if (
+            not isinstance(geotag.get("place_id"), str)
+            or not 1 <= len(geotag["place_id"].strip()) <= 200
+        ):
+            return "Each geotag requires an Amazon Location place_id"
+    return None
 
 
 def _delete_record(document_id, theme_entity_id):
@@ -431,7 +485,10 @@ def _approve_document_records(document_id, body):
     }
 
 
-def _admin_auth_error(event):
+def _authenticated_user(event):
+    def reject(status, detail):
+        return None, (status, {"detail": detail})
+
     headers = event.get("headers") or {}
     authorization = next(
         (
@@ -441,15 +498,15 @@ def _admin_auth_error(event):
         "",
     )
     if not isinstance(authorization, str) or len(authorization) > 8192:
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     if not authorization.lower().startswith("bearer "):
-        return 401, {"detail": "Authentication required"}
+        return reject(401, "Authentication required")
     parts = authorization[7:].strip().split(".")
     if len(parts) != 3:
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     header, body, signature = parts
     if not re.fullmatch(r"[A-Za-z0-9_-]+", signature):
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     expected = base64.urlsafe_b64encode(
         hmac.new(
             JWT_SECRET.encode(),
@@ -458,12 +515,12 @@ def _admin_auth_error(event):
         ).digest()
     ).rstrip(b"=").decode()
     if not hmac.compare_digest(signature, expected):
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     try:
         jwt_header = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
         payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     except (TypeError, ValueError, json.JSONDecodeError):
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     expiration = payload.get("exp") if isinstance(payload, dict) else None
     if (
         not isinstance(jwt_header, dict)
@@ -471,18 +528,37 @@ def _admin_auth_error(event):
         or not isinstance(expiration, (int, float))
         or expiration < int(time.time())
     ):
-        return 401, {"detail": "Invalid or expired authentication token"}
+        return reject(401, "Invalid or expired authentication token")
     username = payload.get("username")
     if not isinstance(username, str):
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     username = username.strip().lower()
     if not username:
-        return 401, {"detail": "Invalid authentication token"}
+        return reject(401, "Invalid authentication token")
     current_user = users_table.get_item(Key={"username": username}).get("Item")
     if not current_user:
-        return 401, {"detail": "User account is unavailable"}
+        return None, (401, {"detail": "User account is unavailable"})
+    return current_user, None
+
+
+def _admin_auth_error(event):
+    current_user, auth_error = _authenticated_user(event)
+    if auth_error:
+        return auth_error
     if current_user.get("role") != "admin":
         return 403, {"detail": "Admin access required"}
+    return None
+
+
+def _atlas_auth_error(event):
+    current_user, auth_error = _authenticated_user(event)
+    if auth_error:
+        return auth_error
+    permissions = current_user.get("permissions") or []
+    if not isinstance(permissions, list):
+        permissions = []
+    if current_user.get("role") != "admin" and "atlas" not in permissions:
+        return 403, {"detail": "Atlas access required"}
     return None
 
 
@@ -668,8 +744,14 @@ def handler(event: dict, context) -> dict:
         theme_entity_id = path_params.get("theme_entity_id") or record_match.group(2)
         try:
             if method == "PUT":
+                body = _parse_body(event)
+                attributes = body.get("attributes", body)
+                if isinstance(attributes, dict) and "geotag" in attributes:
+                    auth_error = _atlas_auth_error(event)
+                    if auth_error:
+                        return _response(*auth_error)
                 status, body = _update_record(
-                    document_id, theme_entity_id, _parse_body(event)
+                    document_id, theme_entity_id, body
                 )
                 return _response(status, body)
             if method == "DELETE":
