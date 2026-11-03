@@ -5,10 +5,16 @@ venv/
 .env
 .venv/
 jrf-task-llm/
+jrf-task-atlas/
 
 # React build output (Amplify builds this itself)
 NLP-Pipleline-frontEnd/ocr-explorer/build/
 NLP-Pipleline-frontEnd/ocr-explorer/node_modules/
+
+# Standalone Atlas microfrontend
+jrf-task-atlas/frontend/node_modules/
+jrf-task-atlas/frontend/dist/
+jrf-task-atlas/frontend/.env.local
 
 # AWS CLI installer
 awscliv2.zip
@@ -23,4 +29,3 @@ aws-deployment/.pytest_cache/
 
 # Ignore zip files
 textract-backend/*.zip
-

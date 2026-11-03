@@ -96,6 +96,24 @@ not a substitute for this server-side admin check.
 | GET, POST | `/api/database/taxonomy` | Read or save extraction themes. |
 | DELETE | `/api/database/taxonomy/{entity_key}` | Remove a theme. |
 
+Atlas adds a validated `geotag` list to the existing record-update allowlist. It is
+an additive attribute; the update preserves all other record fields. The geocoding
+function is a separate local source module under `jrf-task-atlas/backend` and is not
+part of this retrieval Lambda package or deployed API yet.
+
+## Atlas integration status
+
+The standalone Atlas frontend reads approved facts using the existing records route.
+After a user confirms an Amazon Location candidate, it updates only that fact's
+`geotag` attribute. The retrieval Lambda validates the list length, known field set,
+place metadata, latitude/longitude ranges, relevance, provider, and review status.
+Atlas geocoding itself is designed as a separate `jrf-task-atlas-*` Lambda and place
+index; it only returns candidates and never writes to DynamoDB.
+
+Do not add production routes or provision AWS resources until the local Atlas app,
+IAM permissions, API Gateway CORS, and exact-origin frontend configuration are
+reviewed and explicitly authorized.
+
 ## Local checks and deployment
 
 Run backend tests from the backend directory:
