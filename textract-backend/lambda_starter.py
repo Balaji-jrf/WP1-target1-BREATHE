@@ -42,6 +42,19 @@ dynamo      = boto3.resource("dynamodb", region_name=AWS_REGION)
 table       = dynamo.Table(DYNAMO_TABLE)
 
 
+def _saved_document_meta(document_id: str) -> dict:
+    """Keep the upload form's name and tag when OCR status writes replace the item."""
+    existing = table.get_item(
+        Key={"document_id": document_id},
+        ProjectionExpression="doc_name, doc_tag",
+    ).get("Item", {})
+    return {
+        key: existing[key]
+        for key in ("doc_name", "doc_tag")
+        if key in existing
+    }
+
+
 def _bbox(block: dict) -> list[float]:
     box = block["Geometry"]["BoundingBox"]
     return [
@@ -250,7 +263,7 @@ def _save_ocr_to_s3(document_id: str, filename: str, analysis: dict) -> str:
 def _write_processing(document_id, filename, s3_key, timestamp, file_size_bytes=0):
     if not S3_BUCKET:
         raise RuntimeError("S3_BUCKET environment variable is required")
-    table.put_item(Item={
+    item = {
         "document_id":     document_id,
         "filename":        filename,
         "s3_bucket":       S3_BUCKET,
@@ -260,7 +273,9 @@ def _write_processing(document_id, filename, s3_key, timestamp, file_size_bytes=
         "total_pages":     0,
         "element_count":   0,
         "status":          "processing",
-    })
+    }
+    item.update(_saved_document_meta(document_id))
+    table.put_item(Item=item)
 
 
 def _write_completed(document_id, filename, s3_key, timestamp,
@@ -280,6 +295,7 @@ def _write_completed(document_id, filename, s3_key, timestamp,
         "status":          "completed",
         "ocr_s3_key":      ocr_s3_key,
     }
+    item.update(_saved_document_meta(document_id))
     if started_at is not None:
         item["processing_time_seconds"] = Decimal(str(round(time.time() - started_at, 1)))
     table.put_item(Item=item)

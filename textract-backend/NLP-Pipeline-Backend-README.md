@@ -1,272 +1,114 @@
-# BREATHE NLP Pipeline — Backend
+# BREATHE NLP Pipeline · Backend
 
-AWS OCR ingestion and retrieval services for the BREATHE research project.
+The backend uses AWS Lambda, API Gateway, S3, Textract, DynamoDB, and Amazon Bedrock
+to store document uploads, OCR output, and reviewed facts. The AWS region is
+`ap-southeast-2` unless the selected Bedrock model is hosted elsewhere.
 
-## Deployed resources
-
-| Resource | Name | Region |
-|---|---|---|
-| S3 bucket | `jrf-task-ocr-931092012939-ap-southeast-2` | `ap-southeast-2` |
-| DynamoDB table | `jrf-task-ocr-DocumentOCR` | `ap-southeast-2` |
-| HTTP API | `jrf-task-ocr-api` (`o0dqnexpsg`) | `ap-southeast-2` |
-| API stage/base URL | `prod` — `https://o0dqnexpsg.execute-api.ap-southeast-2.amazonaws.com/prod` | `ap-southeast-2` |
-
-## Request and processing flow
+## Processing flow
 
 ```text
-Browser
-  ├─ GET /upload-url?filename=report.pdf
-  │    └─ jrf-task-ocr-upload-url
-  │         returns document_id + 15-minute presigned S3 PUT URL
-  ├─ PUT file directly to S3: uploads/{document_id}/{filename}
-  │    └─ S3 ObjectCreated notification invokes jrf-task-ocr-starter
-  │         ├─ PNG/JPEG: AnalyzeDocument with TABLES + LAYOUT (synchronous)
-  │         └─ PDF/TIFF: StartDocumentAnalysis and poll GetDocumentAnalysis
-  │         ├─ writes processed/{document_id}/ocr.json and figure PNG crops
-  │         └─ records processing status and metadata in DynamoDB
-  ├─ GET /document/{document_id}
-  │    └─ jrf-task-ocr-retrieval returns status and presigned document/OCR URLs
-  └─ GET /documents
-       └─ jrf-task-ocr-retrieval lists document metadata for History
+Browser ── GET /upload-url ──> upload URL Lambda
+   │                              │
+   └── direct S3 PUT ─────────────┘
+                                  │ uploads/{document_id}/...
+                                  ▼
+                         S3 upload notification
+                                  │
+                                  ▼
+                         OCR starter Lambda
+                                  │ Textract
+                    processed/{document_id}/ocr.json
+                                  │
+                 DocumentOCR metadata/status row
+
+Browser ── GET /documents, /document/{id} ──> retrieval Lambda
+Browser ── records / taxonomy / delete ─────> retrieval Lambda
+Browser ── POST /api/documents/ingest-dynamo > extraction handler
 ```
 
-The S3 notification is filtered to the `uploads/` prefix. OCR output is written under
-`processed/`, so output writes do not invoke the starter again.
+The browser sends files directly to S3 using a short-lived URL; API Gateway does not
+proxy the file bytes. The OCR JSON and figure crops remain in private S3 and are
+presented through temporary presigned URLs.
 
-## S3 object layout
+## Data tables
 
-```text
-jrf-task-ocr-931092012939-ap-southeast-2/
-├── uploads/{document_id}/{filename}       original input
-├── processed/{document_id}/ocr.json       OCR JSON
-└── processed/{document_id}/figures/*.png  rendered figure crops
-```
-
-The bucket is private. The browser uses presigned URLs; do not make the bucket public.
-Its CORS configuration must include each frontend origin that needs browser PUT, GET,
-and HEAD access. The configured origins currently include the production site, test
-site, and `http://localhost:3000`.
-
-## OCR JSON
-
-```json
-{
-  "document_id": "uuid",
-  "filename": "report.pdf",
-  "total_pages": 1,
-  "elements": [
-    {
-      "page": 1,
-      "text": "Detected text",
-      "confidence": 0.9987,
-      "bbox": [0.1, 0.2, 0.8, 0.3]
-    }
-  ],
-  "layout": [
-    {"type": "title", "page": 1, "text": "Report", "bbox": [0.1, 0.1, 0.8, 0.2]}
-  ],
-  "tables": [
-    {"page": 1, "bbox": [0.1, 0.2, 0.8, 0.5], "rows": [["Item", "Count"]]}
-  ],
-  "figures": [
-    {
-      "figure_id": "figure-0001",
-      "page": 1,
-      "bbox": [0.1, 0.5, 0.8, 0.9],
-      "crop_status": "saved",
-      "image_s3_key": "processed/uuid/figures/page-0001-figure-0001.png"
-    }
-  ]
-}
-```
-
-- `elements` preserves line text, confidence (0–1), page, and normalized bounding box.
-- `layout` contains Textract layout types and associated text where available.
-- `tables` contains table cell text arranged by row and column.
-- `figures` contains the detected page and normalized bounding box, crop status, and
-  S3 object key when the PNG crop was saved. Retrieval signs crop URLs for the browser;
-  temporary URLs are not persisted in OCR JSON.
-
-## DynamoDB table
-
-Table: `jrf-task-ocr-DocumentOCR`
-
-Partition key: `document_id` (String), no sort key.
-
-The table stores document metadata and status (`processing`, `completed`, or `failed`).
-OCR JSON remains in S3 to avoid DynamoDB's item-size limit. Common attributes include
-`filename`, `s3_bucket`, `s3_key`, `ocr_s3_key`, `total_pages`, `element_count`,
-`table_count`, `figure_count`, `uploaded_at`, `file_size_bytes`, and
-`processing_time_seconds`.
-
-## Lambda functions and roles
-
-| Function | Handler source | Execution role | Purpose |
-|---|---|---|---|
-| `jrf-task-ocr-upload-url` | `lambda_processor.py` | `jrf-task-ocr-upload-url-role` | Signs browser upload URLs |
-| `jrf-task-ocr-starter` | `lambda_starter.py` | `jrf-task-ocr-starter-role` | Runs Textract after S3 upload |
-| `jrf-task-ocr-retrieval` | `lambda_retrieval.py` | `jrf-task-ocr-retrieval-role` | Reads metadata and signs result URLs |
-
-Each role includes `AWSLambdaBasicExecutionRole` for CloudWatch Logs and a scoped inline
-policy for its service access. The upload role can `s3:PutObject` only under `uploads/*`.
-The starter accesses the OCR bucket, the OCR table, and Textract analysis APIs. The
-retrieval role can read the OCR table and generate URLs for objects under `uploads/*`
-and `processed/*`.
-
-The starter Lambda needs PyMuPDF to render and crop detected figure regions. Its
-dependency is listed in `requirements.txt`; include it in the deployment package for
-the same Python runtime and architecture as the Lambda. Build the package in a
-Linux-compatible environment, install the requirements into a staging directory, copy
-`lambda_starter.py` there, and zip the staging contents before updating the function.
-The package must remain within Lambda deployment size limits. The starter role needs
-`s3:GetObject` on `uploads/*` and `s3:PutObject` on `processed/*`.
-
-Example package commands (run from `textract-backend/` in a compatible Linux
-environment):
-
-```bash
-mkdir -p build-starter
-python3 -m pip install -r requirements.txt -t build-starter/
-cp lambda_starter.py build-starter/
-(cd build-starter && zip -r ../starter.zip .)
-```
-
-Only documents processed after deploying this version get figure crops automatically.
-Older records continue to display detection metadata; re-upload the source file to make
-a newly processed record with image crops.
-
-Starter environment variables:
-
-| Variable | Value |
-|---|---|
-| `S3_BUCKET` | `jrf-task-ocr-931092012939-ap-southeast-2` |
-| `DYNAMO_TABLE` | `jrf-task-ocr-DocumentOCR` |
-
-Upload URL environment variables:
-
-| Variable | Value |
-|---|---|
-| `S3_BUCKET` | `jrf-task-ocr-931092012939-ap-southeast-2` |
-| `ALLOWED_ORIGIN` | Frontend origin |
-
-Retrieval environment variables:
-
-| Variable | Value |
-|---|---|
-| `DYNAMO_TABLE` | `jrf-task-ocr-DocumentOCR` |
-| `ALLOWED_ORIGIN` | Frontend origin |
-
-Lambda provides `AWS_REGION` automatically. All functions and AWS clients use
-`ap-southeast-2`.
-
-## HTTP API routes
-
-| Method | Path | Integration |
+| DynamoDB table | Key | Purpose |
 |---|---|---|
-| `GET` | `/upload-url` | `jrf-task-ocr-upload-url` |
-| `GET` | `/documents` | `jrf-task-ocr-retrieval` |
-| `GET` | `/document/{document_id}` | `jrf-task-ocr-retrieval` |
+| `jrf-task-ocr-DocumentOCR` | `document_id` (partition) | One document's filename, tag, status, S3 keys, counts, and extraction review totals. |
+| `jrf-task-ocr-ExtractedRecords` | `id` (partition), `theme_entity_id` (sort) | One fact per item. `id` is `DOC#{document_id}`. `ThemeIndex` uses `theme` + `document_id`; `LocationIndex` uses `district` + `document_id`. |
+| `jrf-task-data-EntityTaxonomy` | `entity_key` (partition) | Active extraction themes, descriptions, keywords, and guidance. |
+| `jrf-task-BreatheUsers` | `username` (partition) | User role, password hash, email, and tab permissions. |
 
-The HTTP API must also be configured with the database routes below; adding handler
-code alone does not create API Gateway routes.
+An extracted record stores its theme, concise fact, source excerpt, `pdf_page_num`,
+location and time fields, confidence, extraction type, and review status. AI facts use
+`entity_type=thematic_fact`; manual facts use `manual_fact`; OCR items saved by a user
+may use `user_saved`.
 
-| `POST` | `/api/documents/ingest-dynamo` | `jrf-task-dynamo-ingestion` — body: `{"document_id":"..."}` |
-| `GET` | `/api/documents/{document_id}/records` | `jrf-task-ocr-retrieval` — filters: `theme`, `district`, `location`, `pdf_page_num`, `content_type`, `entity_type`, `status` |
-| `POST` | `/api/documents/{document_id}/records` | `jrf-task-ocr-retrieval` — create a record |
-| `PUT` | `/api/documents/{document_id}/records/{theme_entity_id}` | `jrf-task-ocr-retrieval` — edit a record |
-| `DELETE` | `/api/documents/{document_id}/records/{theme_entity_id}` | `jrf-task-ocr-retrieval` — delete a record |
-| `GET` | `/api/database/taxonomy` | `jrf-task-ocr-retrieval` — list the dynamic extraction schema |
-| `POST` | `/api/database/taxonomy` | `jrf-task-ocr-retrieval` — add or update a taxonomy entry |
-| `DELETE` | `/api/database/taxonomy/{entity_key}` | `jrf-task-ocr-retrieval` — remove a taxonomy entry |
-| `POST` | `/api/documents/{document_id}/records/approve` | `jrf-task-ocr-retrieval` — approve selected staged records |
+## AI fact extraction
 
-Extracted output is stored in `jrf-task-ocr-ExtractedRecords`, configured through
-`EXTRACTED_RECORDS_TABLE`. It uses `(id, theme_entity_id)` keys and the ThemeIndex and
-LocationIndex. The retrieval role needs DynamoDB read/write access to this table,
-update access to DocumentOCR, and `s3:GetObject` for OCR JSON.
+`ai_extractor.py` loads active themes from `jrf-task-data-EntityTaxonomy`. It groups
+OCR text by page, limits each chunk to a bounded size, and sends chunks to Bedrock
+sequentially. The model must select an active theme and return a concise fact with
+supporting source text. Invalid themes and unsupported excerpts are rejected. Records
+are saved as `pending_review`; a reviewer can edit, approve, or delete them.
 
-Add the routes above to the HTTP API with Lambda proxy integration to
-`jrf-task-dynamo-ingestion` for the ingestion route and `jrf-task-ocr-retrieval`
-for document-record and taxonomy routes. API Gateway CORS
-must allow `GET, POST, PUT, DELETE, OPTIONS` and the `content-type` header for the
-configured frontend origins. Package `dynamo_ingestion.py` as `lambda_function.py`
-and include `ai_extractor.py` in the ingestion Lambda package because its configured
-handler is `lambda_function.lambda_handler`.
+Allowed model routes are configured in `ai_extractor.py`: Nova Lite, Nova 2 Lite, and
+Ministral in Sydney, plus Llama 3.1 8B in `us-west-2`. AWS account/model access and
+cross-region permissions must be enabled for the selected model.
 
-### Nova Lite review workflow
+`lambda_starter.py` runs OCR after an upload. `ai_extractor.py` contains chunking,
+prompt, model-routing, and validation logic. `dynamo_ingestion.py` and
+`lambda_function.py` provide AI extraction/write flows; `lambda_retrieval.py` also
+contains the existing extraction API route and implements document, record, taxonomy,
+and deletion APIs. Confirm the deployed API Gateway integration matches the chosen
+handler and package; source code alone does not create an API Gateway route.
 
-The ingestion starter asynchronously invokes itself after validating OCR completion.
-It groups OCR lines into page chunks of up to 1,500 characters, loads active entries
-from `jrf-task-data-EntityTaxonomy`, and sends each chunk to Amazon Bedrock model
-`amazon.nova-lite-v1:0` in `ap-southeast-2`. There is no local model fallback. Facts
-with an unknown theme, fewer than five words / 35 characters, or confidence below
-0.55 are discarded. Facts, tables, and figures are written with
-`review_status=pending_review`; the document's `ingestion_status` is set accordingly.
+## Document deletion
 
-`GET /api/documents/{document_id}/records` returns approved records by default.
-Use `?status=pending_review` for the review queue or `?status=all` for all records.
-The frontend can edit and delete staged records, add manual facts, and approve chosen
-`theme_entity_id` values. Approval marks them `approved`; the document changes to
-`completed` when no pending records remain. Taxonomy entries are prompt schema, so
-new active themes are used on later ingestion runs without a backend code change.
+`DELETE /document/{document_id}` is configured on the `prod` API Gateway stage and
+connects to the retrieval Lambda. The Lambda has access to the user table and receives
+the same `JWT_SECRET` as the auth Lambda. For a new environment, add this route and
+grant the API Gateway stage permission to invoke the Lambda. The endpoint:
 
-The ingestion Lambda requires `BEDROCK_MODEL_ID=amazon.nova-lite-v1:0`,
-`TAXONOMY_TABLE=jrf-task-data-EntityTaxonomy`, and permission for
-`bedrock:InvokeModel` on the Nova Lite foundation model. It also needs permission to
-invoke itself asynchronously and a timeout long enough for page-level model calls.
-The retrieval role needs DynamoDB read/write access to the taxonomy table.
+1. Verifies the token signature and expiry, then checks the user's current DynamoDB
+   role is `admin`.
+2. Rejects documents whose OCR or AI extraction is still running.
+3. Deletes the document's S3 upload and `processed/{document_id}/` objects.
+4. Deletes all extracted-record rows with partition key `DOC#{document_id}`.
+5. Deletes the DocumentOCR metadata row last.
 
-Provision or inspect the tables with:
+Configure API CORS to permit the `authorization` header. S3 deletion errors are
+reported and leave the metadata available for a retry. The frontend confirmation is
+not a substitute for this server-side admin check.
 
-```bash
-python3 textract-backend/provision_tables.py --region ap-southeast-2
-```
+## API routes
 
-The current deployed DocumentOCR table has only the
-`document_id` partition key. DynamoDB cannot add `record_type` as a sort key in place;
-the ingestion writes `record_type="METADATA"` as a regular attribute while preserving
-the existing table and its records. The script creates the extraction-entities table
-and rejects incompatible existing key schemas rather than deleting or replacing data.
-The legacy `jrf-task-data-Extraction-entities` table was migrated to
-`jrf-task-ocr-ExtractedRecords`; 1,478 source records were key-verified before the
-old table was removed. Backup `before-records-table-migration-20261024` is available
-for recovery. `migrate_extracted_records.py` documents the one-time copy operation.
-For a new environment, provision the OCR table with the same existing single-key
-schema before deploying these functions.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/upload-url` | Create upload ID and presigned URL. |
+| GET | `/documents` | List document metadata. |
+| GET, DELETE | `/document/{document_id}` | Read document / admin-delete document data. |
+| PUT | `/document/{document_id}/meta` | Save document name and tag. |
+| POST | `/api/documents/ingest-dynamo` | Start AI extraction for completed OCR. |
+| GET, POST | `/api/documents/{document_id}/records` | List or add facts. |
+| PUT, DELETE | `/api/documents/{document_id}/records/{theme_entity_id}` | Edit or delete a fact. |
+| POST | `/api/documents/{document_id}/records/approve` | Approve selected records or all pending records. |
+| GET, POST | `/api/database/taxonomy` | Read or save extraction themes. |
+| DELETE | `/api/database/taxonomy/{entity_key}` | Remove a theme. |
 
-Entity ingestion reads the completed `ocr_s3_key`, writes table, figure, and
-Nova Lite extracted-fact records, and updates OCR metadata with counts and ingestion
-status. Re-running ingestion upserts records with stable document/page identifiers.
-Figure `s3_crop_url` values are stable `s3://` URIs; retrieval presigned URLs remain
-short-lived and are returned only by the existing document endpoint.
+## Local checks and deployment
 
-The deployed `prod` stage has CORS configured for the production frontend and
-`http://localhost:3000`. API routes currently use no authentication; CORS does not
-protect the API from non-browser clients. Add authentication and request controls before
-using it for sensitive documents or unrestricted public access.
-
-## Local validation
-
-From the repository root:
+Run backend tests from the backend directory:
 
 ```bash
-python3 -m venv textract-backend/.venv
-textract-backend/.venv/bin/python -m pip install \
-  -r textract-backend/requirements.txt
-textract-backend/.venv/bin/python -m pip install boto3
-textract-backend/.venv/bin/python -m unittest discover \
-  -s textract-backend -p 'test_*.py' -v
+cd textract-backend
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 -m py_compile lambda_retrieval.py lambda_auth.py
 ```
 
-Compile the Lambda source separately with:
+Before deploying, package all modules imported by the configured Lambda handler, set
+table/bucket names and permissions, configure API routes/CORS, and ensure the retrieval
+Lambda receives `JWT_SECRET` and `USERS_TABLE` through protected environment settings.
+Never put secret values in README files, source control, or terminal logs.
 
-```bash
-python3 -m py_compile \
-  textract-backend/lambda_processor.py \
-  textract-backend/lambda_starter.py \
-  textract-backend/lambda_retrieval.py
-```
-
-The unit tests cover upload URL validation, OCR block parsing, PDF/raster figure
-cropping, and signing crop URLs. A synthetic PNG and a synthetic PDF containing a table
-have also been processed successfully in the Sydney account.
+The [system guide](../SYSTEM-GUIDE.md) gives the full architecture and schema map.

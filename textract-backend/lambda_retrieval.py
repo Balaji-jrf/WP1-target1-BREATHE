@@ -15,6 +15,9 @@ import logging
 import os
 import re
 import base64
+import hashlib
+import hmac
+import time
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -34,6 +37,8 @@ TAXONOMY_TABLE_NAME = os.environ.get(
     "TAXONOMY_TABLE", "jrf-task-data-EntityTaxonomy"
 )
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
+JWT_SECRET = os.environ.get("JWT_SECRET", "breathe-secret-change-me")
+USERS_TABLE_NAME = os.environ.get("USERS_TABLE", "jrf-task-BreatheUsers")
 
 CONTENT_TYPES = {
     ".pdf":  "application/pdf",
@@ -48,6 +53,7 @@ dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
 table  = dynamo.Table(DYNAMO_TABLE)
 records_table = dynamo.Table(EXTRACTED_RECORDS_TABLE_NAME)
 taxonomy_table = dynamo.Table(TAXONOMY_TABLE_NAME)
+users_table = dynamo.Table(USERS_TABLE_NAME)
 s3 = boto3.client(
     "s3",
     region_name=AWS_REGION,
@@ -60,7 +66,7 @@ def _cors_headers() -> dict:
     return {
         "Access-Control-Allow-Origin":  os.environ.get("ALLOWED_ORIGIN", "*"),
         "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-        "Access-Control-Allow-Headers": "content-type",
+        "Access-Control-Allow-Headers": "content-type,authorization",
     }
 
 
@@ -78,7 +84,8 @@ def _list_documents() -> dict:
                                 "text_blocks_count, layout_regions_count, table_count, "
                                 "figure_count, uploaded_at, created_at, document_name, #st, "
                                 "file_size_bytes, processing_time_seconds, ingestion_status, "
-                                "extracted_entity_count, pending_review_count, ingestion_error, record_type",
+                                "extracted_entity_count, pending_review_count, ingestion_error, record_type, "
+                                "doc_name, doc_tag",
         "ExpressionAttributeNames": {"#st": "status"},
     }
     while True:
@@ -162,7 +169,13 @@ def _get_document_records(document_id: str, params: dict) -> dict:
     for field in ("theme", "content_type", "entity_type"):
         wanted = (params.get(field) or "").strip()
         if wanted:
-            condition = Attr(field).eq(wanted)
+            if field == "entity_type" and wanted == "user_saved":
+                condition = (
+                    Attr(field).eq("user_saved")
+                    | Attr(field).eq("manual_fact")
+                )
+            else:
+                condition = Attr(field).eq(wanted)
             filter_expression = condition if filter_expression is None else filter_expression & condition
 
     page = (params.get("pdf_page_num") or "").strip()
@@ -180,12 +193,30 @@ def _get_document_records(document_id: str, params: dict) -> dict:
 
     location = (params.get("location") or "").strip()
     if location:
+        # Case-insensitive: store lowercase variants and search lowercase
+        loc_lower = location.lower()
+        loc_title = location.title()
+        loc_upper = location.upper()
         condition = (
             Attr("spatial_units.district").contains(location)
+            | Attr("spatial_units.district").contains(loc_lower)
+            | Attr("spatial_units.district").contains(loc_title)
             | Attr("spatial_units.taluk").contains(location)
+            | Attr("spatial_units.taluk").contains(loc_lower)
+            | Attr("spatial_units.taluk").contains(loc_title)
             | Attr("spatial_units.village").contains(location)
+            | Attr("spatial_units.village").contains(loc_lower)
+            | Attr("spatial_units.village").contains(loc_title)
             | Attr("spatial_units.town").contains(location)
+            | Attr("spatial_units.town").contains(loc_lower)
+            | Attr("spatial_units.town").contains(loc_title)
             | Attr("district").contains(location)
+            | Attr("district").contains(loc_lower)
+            | Attr("district").contains(loc_title)
+            | Attr("source_text_chunk").contains(location)
+            | Attr("source_text_chunk").contains(loc_title)
+            | Attr("extracted_fact").contains(location)
+            | Attr("extracted_fact").contains(loc_title)
         )
         filter_expression = condition if filter_expression is None else filter_expression & condition
 
@@ -336,9 +367,31 @@ def _delete_record(document_id, theme_entity_id):
 
 def _approve_document_records(document_id, body):
     document_id = (document_id or "").strip()
-    entity_ids = body.get("approved_entity_ids")
-    if not document_id or not isinstance(entity_ids, list) or not entity_ids:
-        return 400, {"detail": "A non-empty approved_entity_ids list is required"}
+    if not document_id or not isinstance(body, dict):
+        return 400, {"detail": "A document ID and approval request are required"}
+    if body.get("approve_all") is True:
+        entity_ids, last_key = [], None
+        while True:
+            kwargs = {
+                "KeyConditionExpression": Key("id").eq(f"DOC#{document_id}"),
+                "FilterExpression": Attr("review_status").eq("pending_review"),
+                "ProjectionExpression": "theme_entity_id",
+            }
+            if last_key:
+                kwargs["ExclusiveStartKey"] = last_key
+            response = records_table.query(**kwargs)
+            entity_ids.extend(
+                item["theme_entity_id"]
+                for item in response.get("Items", [])
+                if item.get("theme_entity_id")
+            )
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+    else:
+        entity_ids = body.get("approved_entity_ids")
+        if not isinstance(entity_ids, list) or not entity_ids:
+            return 400, {"detail": "A non-empty approved_entity_ids list is required"}
     approved_at = datetime.now(timezone.utc).isoformat()
     approved = 0
     for entity_id in dict.fromkeys(str(value).strip() for value in entity_ids if str(value).strip()):
@@ -375,6 +428,126 @@ def _approve_document_records(document_id, body):
         "approved_count": approved,
         "pending_review_count": remaining,
         "ingestion_status": document_status,
+    }
+
+
+def _admin_auth_error(event):
+    headers = event.get("headers") or {}
+    authorization = next(
+        (
+            value for key, value in headers.items()
+            if isinstance(key, str) and key.lower() == "authorization"
+        ),
+        "",
+    )
+    if not isinstance(authorization, str) or len(authorization) > 8192:
+        return 401, {"detail": "Invalid authentication token"}
+    if not authorization.lower().startswith("bearer "):
+        return 401, {"detail": "Authentication required"}
+    parts = authorization[7:].strip().split(".")
+    if len(parts) != 3:
+        return 401, {"detail": "Invalid authentication token"}
+    header, body, signature = parts
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", signature):
+        return 401, {"detail": "Invalid authentication token"}
+    expected = base64.urlsafe_b64encode(
+        hmac.new(
+            JWT_SECRET.encode(),
+            f"{header}.{body}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).rstrip(b"=").decode()
+    if not hmac.compare_digest(signature, expected):
+        return 401, {"detail": "Invalid authentication token"}
+    try:
+        jwt_header = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 401, {"detail": "Invalid authentication token"}
+    expiration = payload.get("exp") if isinstance(payload, dict) else None
+    if (
+        not isinstance(jwt_header, dict)
+        or jwt_header.get("alg") != "HS256"
+        or not isinstance(expiration, (int, float))
+        or expiration < int(time.time())
+    ):
+        return 401, {"detail": "Invalid or expired authentication token"}
+    username = payload.get("username")
+    if not isinstance(username, str):
+        return 401, {"detail": "Invalid authentication token"}
+    username = username.strip().lower()
+    if not username:
+        return 401, {"detail": "Invalid authentication token"}
+    current_user = users_table.get_item(Key={"username": username}).get("Item")
+    if not current_user:
+        return 401, {"detail": "User account is unavailable"}
+    if current_user.get("role") != "admin":
+        return 403, {"detail": "Admin access required"}
+    return None
+
+
+def _delete_document(document_id):
+    document_id = (document_id or "").strip()
+    if not document_id:
+        return 400, {"detail": "document_id is required"}
+    document = table.get_item(Key={"document_id": document_id}).get("Item")
+    if not document:
+        return 404, {"detail": "Document not found"}
+    if document.get("status") == "processing" or document.get("ingestion_status") == "processing":
+        return 409, {"detail": "Cannot delete a document while OCR or AI extraction is running"}
+    bucket = document.get("s3_bucket")
+    if not bucket:
+        return 409, {"detail": "Document storage details are missing; no data was deleted"}
+
+    record_keys, last_key = [], None
+    while True:
+        kwargs = {
+            "KeyConditionExpression": Key("id").eq(f"DOC#{document_id}"),
+            "ProjectionExpression": "id, theme_entity_id",
+        }
+        if last_key:
+            kwargs["ExclusiveStartKey"] = last_key
+        response = records_table.query(**kwargs)
+        record_keys.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+
+    object_keys = {
+        key for key in (document.get("s3_key"), document.get("ocr_s3_key"))
+        if isinstance(key, str) and key
+    }
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"processed/{document_id}/"):
+        object_keys.update(
+            item["Key"] for item in page.get("Contents", []) if item.get("Key")
+        )
+    object_key_list = sorted(object_keys)
+    for start in range(0, len(object_key_list), 1000):
+        response = s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": key} for key in object_key_list[start:start + 1000]]},
+        )
+        if response.get("Errors"):
+            LOGGER.error(
+                "S3 document cleanup failed for %s (%d object errors)",
+                document_id,
+                len(response["Errors"]),
+            )
+            raise RuntimeError("One or more document files could not be deleted")
+
+    with records_table.batch_writer() as batch:
+        for key in record_keys:
+            batch.delete_item(Key={
+                "id": key["id"],
+                "theme_entity_id": key["theme_entity_id"],
+            })
+    table.delete_item(Key={"document_id": document_id})
+    return 200, {
+        "deleted": True,
+        "document_id": document_id,
+        "deleted_record_count": len(record_keys),
+        "deleted_file_count": len(object_keys),
     }
 
 
@@ -536,12 +709,19 @@ def handler(event: dict, context) -> dict:
                 return _response(404, {"detail": "Document not found"})
             if item.get("status") != "completed" or not item.get("ocr_s3_key"):
                 return _response(409, {"detail": "OCR processing is not complete"})
+            from ai_extractor import DEFAULT_MODEL_ID, get_model_config
             from dynamo_ingestion import ingest_document
+            model_id = body.get("model_id") or DEFAULT_MODEL_ID
+            try:
+                get_model_config(model_id)
+            except ValueError as error:
+                return _response(400, {"detail": str(error)})
             result = ingest_document(
                 document_id,
                 item["s3_bucket"],
                 item["ocr_s3_key"],
                 item.get("s3_ocr_json_url"),
+                model_id,
             )
             return _response(200, result)
         except Exception:
@@ -554,6 +734,38 @@ def handler(event: dict, context) -> dict:
         except Exception:
             LOGGER.exception("DynamoDB scan failed")
             return _response(500, {"detail": "Failed to list documents"})
+
+    # PUT /document/{id}/meta — save doc_name and doc_tag
+    meta_match = re.search(r"/document/([^/]+)/meta/?$", raw_path)
+    if meta_match and method == "PUT":
+        try:
+            doc_id = path_params.get("document_id") or meta_match.group(1)
+            body   = _parse_body(event)
+            table.update_item(
+                Key={"document_id": doc_id},
+                UpdateExpression="SET doc_name = :n, doc_tag = :t",
+                ExpressionAttributeValues={
+                    ":n": (body.get("doc_name") or "").strip(),
+                    ":t": (body.get("doc_tag") or "").strip(),
+                },
+            )
+            return _response(200, {"saved": True})
+        except Exception:
+            LOGGER.exception("Failed to save document meta")
+            return _response(500, {"detail": "Failed to save document metadata"})
+
+    delete_document_match = re.search(r"/document/([^/]+)/?$", raw_path)
+    if delete_document_match and method == "DELETE":
+        auth_error = _admin_auth_error(event)
+        if auth_error:
+            return _response(*auth_error)
+        try:
+            document_id = path_params.get("document_id") or delete_document_match.group(1)
+            status, body = _delete_document(document_id)
+            return _response(status, body)
+        except Exception:
+            LOGGER.exception("Failed to delete document %s", delete_document_match.group(1))
+            return _response(500, {"detail": "Failed to delete document and its stored data"})
 
     document_id = path_params.get("document_id", "").strip()
     if not document_id:

@@ -527,7 +527,7 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
                 disabled={!selectedId || !recordStats?.total || busy || recLoading}
                 title="Delete every extracted and manually added record for this document"
               >
-                Delete all extracted items
+                Delete all items
               </button>
               <button className="db-btn db-btn-primary" onClick={() => setAdding(true)} disabled={!selectedId}>＋ Add</button>
             </div>
@@ -540,7 +540,7 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
                 </select>
                 <input type="number" min="1" value={newRec.pdf_page_num} onChange={(e) => setNewRec({ ...newRec, pdf_page_num: e.target.value })} placeholder="Doc page (PG)" title="PDF page number within this document" />
                 <textarea required value={newRec.extracted_fact} onChange={(e) => setNewRec({ ...newRec, extracted_fact: e.target.value })} placeholder="Extracted fact…" rows={2} />
-                <input value={newRec.district} onChange={(e) => setNewRec({ ...newRec, district: e.target.value })} placeholder="District" />
+                <input value={newRec.district} onChange={(e) => setNewRec({ ...newRec, district: e.target.value })} placeholder="Location" />
                 <input value={newRec.temporal_period} onChange={(e) => setNewRec({ ...newRec, temporal_period: e.target.value })} placeholder="Period" />
                 <div className="db-add-form-actions">
                   <button className="db-btn db-btn-primary" disabled={busy}>Save</button>
@@ -632,8 +632,8 @@ export default function DatabaseTab({ initialDocumentId = '' }) {
                                     </>
                                   : <>
                                       <button className="db-act-btn" onClick={() => { setEditingId(rec.theme_entity_id); setDraft({}); }} disabled={busy}>Edit</button>
-                                      {rec.review_status === 'pending_review' && <button className="db-act-btn db-act-approve" onClick={() => approveOne(rec)} disabled={busy}>✓</button>}
-                                      <button className="db-act-btn db-act-delete" onClick={() => removeOne(rec)} disabled={busy}>✕</button>
+                                      {rec.review_status === 'pending_review' && <button className="db-act-btn db-act-approve" onClick={() => approveOne(rec)} disabled={busy}>✓ Approve</button>}
+                                      <button className="db-act-btn db-act-delete" onClick={() => removeOne(rec)} disabled={busy}>✕ Delete</button>
                                     </>}
                               </td>
                             </tr>

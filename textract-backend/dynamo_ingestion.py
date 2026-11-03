@@ -10,7 +10,10 @@ from decimal import Decimal
 
 import boto3
 from botocore.config import Config
-from ai_extractor import extract_chunk, page_chunks
+from ai_extractor import (
+    DEFAULT_MODEL_ID, clear_generated_records, extract_chunks_sequential,
+    get_model_config, load_active_taxonomy, page_chunks,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,8 +21,8 @@ OCR_TABLE_NAME = "jrf-task-ocr-DocumentOCR"
 EXTRACTED_RECORDS_TABLE_NAME = "jrf-task-ocr-ExtractedRecords"
 TAXONOMY_TABLE_NAME = "jrf-task-data-EntityTaxonomy"
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
-MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "1500"))
+MODEL_ID = DEFAULT_MODEL_ID
+MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "6000"))
 OCR_TABLE = boto3.resource("dynamodb", region_name=AWS_REGION).Table(
     os.environ.get("DYNAMO_TABLE", OCR_TABLE_NAME)
 )
@@ -76,80 +79,36 @@ def _put_entity(document_id, theme, entity_id, attributes):
     EXTRACTED_RECORDS_TABLE.put_item(Item=_ddb_safe(item))
 
 
-def _caption_for(figure, elements):
-    """Choose the nearest same-page short text line touching the figure's x-range."""
-    box = figure.get("bbox") or []
-    if len(box) != 4:
-        return ""
-    left, top, right, bottom = box
-    candidates = []
-    for element in elements:
-        if element.get("page", 1) != figure.get("page", 1) or len(element.get("bbox") or []) != 4:
-            continue
-        el_left, el_top, el_right, el_bottom = element["bbox"]
-        overlaps_x = el_right >= left and el_left <= right
-        if overlaps_x and (el_bottom <= top or el_top >= bottom):
-            distance = min(abs(top - el_bottom), abs(el_top - bottom))
-            candidates.append((distance, element.get("text", "")))
-    return min(candidates, default=(0, ""), key=lambda candidate: candidate[0])[1]
-
-
 def _load_taxonomy():
-    items, kwargs = [], {}
-    while True:
-        response = TAXONOMY_TABLE.scan(**kwargs)
-        items.extend(response.get("Items", []))
-        if "LastEvaluatedKey" not in response:
-            break
-        kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
-    return sorted(items, key=lambda item: item.get("entity_key", ""))
+    return load_active_taxonomy(TAXONOMY_TABLE)
 
 
-def build_entities(document_id, ocr, taxonomy, bedrock_client=None):
-    """Yield structured assets and validated Nova Lite facts for review."""
+def build_entities(document_id, ocr, taxonomy, bedrock_client=None, model_id=MODEL_ID):
+    """Yield concise, taxonomy-aligned facts extracted sequentially for review."""
     elements = ocr.get("elements", [])
-    bedrock_client = bedrock_client or bedrock
-    for index, table in enumerate(ocr.get("tables", []), start=1):
-        page = int(table.get("page", 1))
-        yield "TABLES", f"P{page:02d}_T{index:03d}", {
-            "pdf_page_num": page,
-            "original_page_num": page,
-            "entity_type": "table",
-            "content_type": "table",
-            "table_data": table.get("rows", []),
-            "bbox": _bbox(table.get("bbox")),
-            "source_text_chunk": " | ".join(
-                " ".join(str(cell) for cell in row if cell)
-                for row in table.get("rows", [])
-            ),
-            "spatial_units": {},
-            "temporal_period": "",
-            "confidence_score": Decimal("1"),
-            "review_status": "pending_review",
-            "custom_attributes": {},
-        }
-
-    for index, figure in enumerate(ocr.get("figures", []), start=1):
-        page = int(figure.get("page", 1))
-        yield "FIGURES", f"P{page:02d}_F{index:03d}", {
-            "pdf_page_num": page,
-            "original_page_num": page,
-            "entity_type": "figure",
-            "content_type": "figure_crop",
-            "extracted_fact": _caption_for(figure, elements),
-            "source_text_chunk": _caption_for(figure, elements),
-            "s3_crop_url": figure.get("image_s3_key", ""),
-            "bbox": _bbox(figure.get("bbox")),
-            "crop_status": figure.get("crop_status", "pending"),
-            "spatial_units": {},
-            "temporal_period": "",
-            "confidence_score": Decimal("1"),
-            "review_status": "pending_review",
-            "custom_attributes": {},
-        }
-
-    for chunk in page_chunks(elements, MAX_CHUNK_CHARS):
-        extracted = extract_chunk(chunk, taxonomy, bedrock_client, MODEL_ID)
+    chunks = list(page_chunks(elements, MAX_CHUNK_CHARS))
+    model_config = get_model_config(model_id)
+    if bedrock_client is None:
+        bedrock_client = (
+            bedrock
+            if model_config["region"] == AWS_REGION
+            else boto3.client(
+                "bedrock-runtime",
+                region_name=model_config["region"],
+                config=Config(
+                    retries={"mode": "adaptive", "total_max_attempts": 5},
+                    connect_timeout=5,
+                    read_timeout=60,
+                ),
+            )
+        )
+    LOGGER.info(
+        "Sequential extraction: %d chunks, model=%s, region=%s",
+        len(chunks), model_id, model_config["region"],
+    )
+    for chunk, extracted in extract_chunks_sequential(
+        chunks, taxonomy, bedrock_client, model_id
+    ):
         for fact_index, fact in enumerate(extracted, start=1):
             entity_id = (
                 f"P{chunk['page']:02d}_C{chunk['chunk_index']:03d}_F{fact_index:02d}"
@@ -160,7 +119,8 @@ def build_entities(document_id, ocr, taxonomy, bedrock_client=None):
                 "entity_type": "thematic_fact",
                 "content_type": "narrative_text",
                 "extracted_fact": fact["extracted_fact"],
-                "source_text_chunk": chunk["text"],
+                "source_text_chunk": fact["source_excerpt"],
+                "source_excerpt": fact["source_excerpt"],
                 "spatial_units": fact["spatial_units"],
                 "temporal_period": fact["temporal_period"],
                 "bbox": _bbox(chunk.get("bbox")),
@@ -170,8 +130,10 @@ def build_entities(document_id, ocr, taxonomy, bedrock_client=None):
             }
 
 
-def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
-    """Load OCR JSON, run Nova Lite over page chunks, and stage records for review."""
+def ingest_document(
+    document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None, model_id=MODEL_ID
+):
+    """Load OCR JSON, run sequential theme extraction, and stage records for review."""
     payload = s3.get_object(Bucket=s3_bucket, Key=ocr_s3_key)["Body"].read()
     ocr = json.loads(payload)
     filename = ocr.get("filename", "")
@@ -212,11 +174,9 @@ def ingest_document(document_id, s3_bucket, ocr_s3_key, s3_ocr_json_url=None):
     )
     try:
         taxonomy = _load_taxonomy()
-        staged_records = list(build_entities(document_id, ocr, taxonomy))
+        staged_records = list(build_entities(document_id, ocr, taxonomy, model_id=model_id))
+        clear_generated_records(EXTRACTED_RECORDS_TABLE, document_id)
         for theme, entity_id, attributes in staged_records:
-            crop_key = attributes.get("s3_crop_url")
-            if crop_key:
-                attributes["s3_crop_url"] = f"s3://{s3_bucket}/{crop_key}"
             _put_entity(document_id, theme, entity_id, {"filename": filename, **attributes})
     except Exception as error:
         OCR_TABLE.update_item(

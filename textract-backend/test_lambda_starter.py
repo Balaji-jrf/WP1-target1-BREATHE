@@ -112,6 +112,9 @@ class FigureCropTests(unittest.TestCase):
         crop = pymupdf.Pixmap(put_object.call_args.kwargs["Body"])
         self.assertEqual((crop.width, crop.height), (120, 180))
 
+
+
+
     def test_crops_raster_image_sources(self):
         image = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 100, 80), False)
         image.clear_with(0x336699)

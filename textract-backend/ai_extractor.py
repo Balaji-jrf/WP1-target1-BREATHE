@@ -1,355 +1,405 @@
-"""
-ai_extractor.py  —  jrf-task-dynamo-ingestion
-=============================================
-Imported by lambda_function.py (same zip).
-
-Responsibilities
-----------------
-1. page_chunks()      — split OCR line elements into bounded text chunks
-2. build_system_prompt() — build the Nova Lite system prompt from the taxonomy
-3. extract_chunk()    — send one chunk to Nova Lite, return validated facts
-4. validate_entities() — filter out weak / malformed Nova Lite responses
-
-No AWS clients are created here — the Bedrock client is passed in from
-lambda_function.py so this module stays independently testable.
-"""
+"""Bounded OCR chunking, taxonomy-grounded extraction, and output validation."""
 
 from __future__ import annotations
 
 import json
 import logging
 import math
+import os
 import time
 
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-# ── Quality thresholds for accepted facts ─────────────────────────────────────
-MIN_FACT_WORDS  = 5     # reject facts shorter than 5 words
-MIN_FACT_CHARS  = 35    # reject facts shorter than 35 characters
-MIN_CONFIDENCE  = 0.55  # reject facts where Nova Lite confidence < 0.55
+MIN_FACT_WORDS  = 5
+MIN_FACT_CHARS  = 35
+MIN_CONFIDENCE  = 0.55
+PAGE_GROUP_SIZE = int(os.environ.get("PAGE_GROUP_SIZE", "10"))
+DEFAULT_MODEL_ID = os.environ.get(
+    "BEDROCK_MODEL_ID", "meta.llama3-1-8b-instruct-v1:0"
+)
+MODEL_CONFIGS = {
+    "amazon.nova-lite-v1:0": {
+        "region": "ap-southeast-2",
+        "label": "Amazon Nova Lite",
+    },
+    "amazon.nova-2-lite-v1:0": {
+        "region": "ap-southeast-2",
+        "label": "Amazon Nova 2 Lite",
+    },
+    "mistral.ministral-3-8b-instruct": {
+        "region": "ap-southeast-2",
+        "label": "Mistral Ministral 3 8B Instruct",
+    },
+    "meta.llama3-1-8b-instruct-v1:0": {
+        "region": "us-west-2",
+        "label": "Meta Llama 3.1 8B Instruct",
+    },
+}
 
-# Minimum chunk size worth sending to Nova Lite — very short chunks
-# (page numbers, headers, single lines) produce unreliable responses
-MIN_CHUNK_CHARS = 80
+_LOG = logging.getLogger(__name__)
 
 
-# ── Bounding-box helpers ──────────────────────────────────────────────────────
+def active_taxonomy(items):
+    """Return only named, explicitly active taxonomy rows."""
+    return sorted(
+        [
+            item for item in items
+            if isinstance(item, dict)
+            and item.get("is_active") is True
+            and isinstance(item.get("entity_key"), str)
+            and item["entity_key"].strip()
+        ],
+        key=lambda item: item["entity_key"],
+    )
 
-def _line_bbox(bbox):
-    """
-    Validate and normalise a single OCR line bounding box.
-    Expects [left, top, right, bottom] as numbers.
-    Returns the list of floats, or None if invalid / non-finite.
-    """
+
+def get_model_config(model_id):
+    """Return a server-controlled model route; never accept arbitrary AWS regions."""
+    try:
+        return MODEL_CONFIGS[model_id]
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"Unsupported extraction model: {model_id}") from error
+
+
+def load_active_taxonomy(table):
+    """Read the active entity definitions from the configured DynamoDB table."""
+    items, kwargs = [], {}
+    while True:
+        response = table.scan(**kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        kwargs["ExclusiveStartKey"] = last_key
+
+    active = active_taxonomy(items)
+    if not active:
+        raise ValueError("No active entity taxonomy found in DynamoDB.")
+    _LOG.info(
+        "Loaded %d active taxonomy themes from DynamoDB: %s",
+        len(active),
+        ", ".join(item["entity_key"] for item in active),
+    )
+    return active
+
+
+def clear_generated_records(records_table, document_id):
+    """Remove prior AI extractions and legacy table/figure assets before refresh."""
+    items, kwargs = [], {
+        "KeyConditionExpression": Key("id").eq(f"DOC#{document_id}"),
+        "ProjectionExpression": "#pk, #sk, entity_type",
+        "ExpressionAttributeNames": {"#pk": "id", "#sk": "theme_entity_id"},
+    }
+    while True:
+        response = records_table.query(**kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        kwargs["ExclusiveStartKey"] = last_key
+
+    obsolete = [
+        item for item in items
+        if item.get("entity_type") == "thematic_fact"
+        or item.get("theme_entity_id", "").startswith(("TABLES#", "FIGURES#"))
+    ]
+    if obsolete:
+        with records_table.batch_writer() as batch:
+            for item in obsolete:
+                batch.delete_item(Key={
+                    "id": item["id"],
+                    "theme_entity_id": item["theme_entity_id"],
+                })
+    _LOG.info(
+        "Cleared %d previous AI/legacy table and figure records for %s",
+        len(obsolete),
+        document_id,
+    )
+    return len(obsolete)
+
+
+# ── Chunking — page-group strategy (same as LLM indexer) ─────────────────────
+
+def _valid_bbox(bbox):
     if not isinstance(bbox, list) or len(bbox) != 4:
         return None
     try:
-        values = [float(v) for v in bbox]
+        vals = [float(v) for v in bbox]
     except (TypeError, ValueError):
         return None
-    return values if all(math.isfinite(v) for v in values) else None
+    return vals if all(math.isfinite(v) for v in vals) else None
 
 
-def _make_chunk(page, chunk_index, lines):
+def _merge_bboxes(elements):
+    boxes = [b for e in elements if (b := _valid_bbox(e.get("bbox")))]
+    if not boxes:
+        return None
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
+
+def page_chunks(elements, max_chars=None, page_group_size=PAGE_GROUP_SIZE):
     """
-    Build a chunk dict from a list of (text, bbox) pairs.
-    The chunk bbox is the union of all line bboxes on this chunk.
+    Group OCR text by page range and split each group into bounded model inputs.
+    Yields dicts: {page, page_end, chunk_index, text, bbox}
     """
-    boxes = [box for _, box in lines if box]
-    bbox = None
-    if boxes:
-        bbox = [
-            min(box[0] for box in boxes),  # leftmost left
-            min(box[1] for box in boxes),  # topmost top
-            max(box[2] for box in boxes),  # rightmost right
-            max(box[3] for box in boxes),  # bottommost bottom
-        ]
-    return {
-        "page":        page,
-        "chunk_index": chunk_index,
-        "text":        " ".join(text for text, _ in lines),
-        "bbox":        bbox,
-    }
-
-
-# ── Page chunking ─────────────────────────────────────────────────────────────
-
-def page_chunks(elements, max_chars=1500):
-    """
-    Group OCR line elements by page, then split each page into text chunks
-    of at most max_chars characters.
-
-    Why chunking?
-    Nova Lite has a token limit. Sending an entire page at once can exceed
-    it for dense documents. Chunking keeps each call within budget while
-    preserving spatial locality (lines on the same page stay together).
-
-    Yields dicts: {page, chunk_index, text, bbox}
-    """
-    # Group lines by page number
+    max_chars = max(1, int(max_chars or 6000))
+    # Group by page
     by_page: dict[int, list] = {}
-    for element in elements or []:
-        text = " ".join(str(element.get("text") or "").split())
-        if text:
-            page = int(element.get("page") or 1)
-            by_page.setdefault(page, []).append((text, _line_bbox(element.get("bbox"))))
+    for el in (elements or []):
+        text = " ".join(str(el.get("text") or "").split())
+        if not text:
+            continue
+        try:
+            page = max(1, int(el.get("page") or 1))
+        except (TypeError, ValueError):
+            page = 1
+        by_page.setdefault(page, []).append({"text": text, "bbox": el.get("bbox")})
 
-    for page in sorted(by_page):
-        chunk_index, current, current_size = 0, [], 0
+    if not by_page:
+        return
 
-        for text, bbox in by_page[page]:
-            # If a single line exceeds max_chars, split it at word boundaries
-            parts = []
-            while len(text) > max_chars:
-                split_at = text.rfind(" ", 0, max_chars)
-                if split_at <= 0:
-                    split_at = max_chars
-                parts.append(text[:split_at].strip())
-                text = text[split_at:].strip()
-            if text:
-                parts.append(text)
+    sorted_pages = sorted(by_page)
+    total_pages  = max(sorted_pages)
+    chunk_index  = 0
 
-            for part in parts:
-                # Flush current chunk if adding this part would exceed the limit
-                if current and current_size + len(part) + 1 > max_chars:
-                    chunk_index += 1
-                    yield _make_chunk(page, chunk_index, current)
-                    current, current_size = [], 0
-                current.append((part, bbox))
-                current_size += len(part) + (1 if len(current) > 1 else 0)
-
-        # Flush the last chunk for this page
+    def split_text(text):
+        pieces, current = [], ""
+        for word in text.split():
+            if len(word) > max_chars:
+                if current:
+                    pieces.append(current)
+                    current = ""
+                pieces.extend(
+                    word[index:index + max_chars]
+                    for index in range(0, len(word), max_chars)
+                )
+                continue
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > max_chars:
+                pieces.append(current)
+                current = word
+            else:
+                current = candidate
         if current:
-            chunk_index += 1
-            yield _make_chunk(page, chunk_index, current)
+            pieces.append(current)
+        return pieces
+
+    page_start = 1
+    while page_start <= total_pages:
+        page_end    = page_start + page_group_size - 1
+        group_pages = [p for p in sorted_pages if page_start <= p <= page_end]
+        if group_pages:
+            group_els  = [el for p in group_pages for el in by_page[p]]
+            current_parts = []
+            current_length = 0
+            current_elements = []
+
+            def emit():
+                nonlocal chunk_index, current_parts, current_length, current_elements
+                if not current_parts:
+                    return None
+                chunk_index += 1
+                result = {
+                    "page":        page_start,
+                    "page_end":    min(page_end, total_pages),
+                    "chunk_index": chunk_index,
+                    "text":        " ".join(current_parts),
+                    "bbox":        _merge_bboxes(current_elements),
+                }
+                current_parts = []
+                current_length = 0
+                current_elements = []
+                return result
+
+            for element in group_els:
+                for piece in split_text(element["text"]):
+                    extra_length = len(piece) + (1 if current_parts else 0)
+                    if current_length + extra_length > max_chars:
+                        chunk = emit()
+                        if chunk:
+                            yield chunk
+                        extra_length = len(piece)
+                    current_parts.append(piece)
+                    current_length += extra_length
+                    current_elements.append(element)
+            chunk = emit()
+            if chunk:
+                yield chunk
+        page_start += page_group_size
 
 
-# ── Nova Lite prompt ──────────────────────────────────────────────────────────
+# ── Prompt ────────────────────────────────────────────────────────────────────
 
 def build_system_prompt(taxonomy):
-    """
-    Build the system prompt that instructs Nova Lite on what to extract.
-
-    The active taxonomy is serialised as JSON and injected directly into
-    the prompt so Nova Lite knows exactly which entity_keys are valid and
-    what each one means. Only active entries (is_active=True) are included.
-    """
-    active = [{
-        "entity_key":          item["entity_key"],
-        "display_name":        item.get("display_name", item["entity_key"]),
-        "description":         item.get("description", ""),
-        "keywords":            item.get("keywords", []),
-        "extraction_guidance": item.get("extraction_guidance", ""),
-    } for item in taxonomy if item.get("is_active", True)]
-
+    active = [
+        {
+            "entity_key":          t["entity_key"],
+            "display_name":        t.get("display_name", t["entity_key"]),
+            "description":         t.get("description", ""),
+            "keywords":            t.get("keywords", []),
+            "extraction_guidance": t.get("extraction_guidance", ""),
+        }
+        for t in active_taxonomy(taxonomy)
+    ]
     schema = json.dumps(active, ensure_ascii=False, separators=(",", ":"))
-
     return f"""You are a careful historical-document research extractor for BREATHE.
-Extract only meaningful, source-supported facts matching an active taxonomy entry.
-The active taxonomy is authoritative and may change. Do not invent or rename keys.
-Do not return headings, isolated words, generic statements, or unsupported facts.
-Write concise, standalone facts useful for historical analysis. Give a confidence_score from
-0 to 1. Use spatial_units as an object with optional district, taluk, village, and town strings.
-Use temporal_period only when the excerpt supports one. Return ONLY a JSON array:
-[{{"theme":"ACTIVE_ENTITY_KEY","extracted_fact":"...","spatial_units":{{"district":"..."}}, "temporal_period":"...", "confidence_score":0.91}}]
-Return [] if there are no strong facts.
+Extract concise, useful facts from the OCR excerpt and assign each only to a matching active entity below.
+Use each entity's description, keywords, and extraction_guidance to decide relevance. Use its exact entity_key.
+Each fact must explain what the source says about that theme in one clear sentence (maximum 40 words).
+Do not return figure captions, table dumps, headings, fragments, generic statements, or unsupported inferences.
+For every fact, include a short verbatim source_excerpt copied exactly from the OCR excerpt (8-35 words).
+Do not create a fact if you cannot provide an exact supporting excerpt.
+Give confidence_score 0-1. Use spatial_units with optional district/taluk/village/town strings.
+Use temporal_period only when the excerpt supports one; otherwise use an empty string.
+Return ONLY a JSON array:
+[{{"theme":"KEY","extracted_fact":"Concise theme-related statement.","source_excerpt":"Exact supporting words from the excerpt.","spatial_units":{{"district":"..."}}, "temporal_period":"...","confidence_score":0.91}}]
+Return [] if no strong facts.
 
 ACTIVE TAXONOMY:
 {schema}"""
 
 
-# ── Nova Lite response parsing ────────────────────────────────────────────────
+# ── Response parsing ──────────────────────────────────────────────────────────
 
 def _response_text(response):
-    """
-    Extract the plain text string from a Bedrock invoke_model response.
-    Nova Lite returns: response.body → JSON → output.message.content[].text
-    Raises ValueError if no text content is found.
-    """
-    body    = json.loads(response["body"].read())
-    content = body.get("output", {}).get("message", {}).get("content", [])
-    text    = next((item.get("text") for item in content if item.get("text")), "")
+    body = response["output"]
+    content = body.get("message", {}).get("content", [])
+    text = next((part.get("text") for part in content if part.get("text")), "")
     if not text:
-        raise ValueError("Nova Lite returned no text content")
+        raise ValueError("Bedrock model returned no text content")
     return text.strip()
 
 
-# Logger for this module — visible in CloudWatch under jrf-task-dynamo-ingestion
-_LOG = logging.getLogger(__name__)
-
-
 def _parse_json_array(text):
-    """
-    Parse a JSON array from Nova Lite's response text.
-
-    Nova Lite sometimes:
-      - Wraps the array in a markdown code fence (```json ... ```)
-      - Returns a plain-text refusal ("I cannot extract...") with no array
-      - Returns an empty array [] directly
-      - Returns extra commentary before or after the array
-
-    Strategy: strip any code fence, then find the outermost [...] bracket
-    pair. If none exists, log the raw response and return [] so the
-    ingestion continues rather than crashing the entire document.
-    """
     cleaned = text.strip()
-    fence   = chr(96) * 3  # ```
-
-    # Strip markdown code fence if present (```json\n[...]\n```)
+    fence   = "```"
     if cleaned.startswith(fence):
         cleaned = cleaned.split("\n", 1)[-1]
         if cleaned.rstrip().endswith(fence):
             cleaned = cleaned.rstrip()[:-3].strip()
-
-    # Find the outermost JSON array brackets
     start, end = cleaned.find("["), cleaned.rfind("]")
     if start < 0 or end < start:
-        # Nova Lite returned prose instead of JSON — log it and skip this chunk
-        _LOG.warning("Nova Lite returned no JSON array — raw response: %.400s", text)
+        _LOG.warning("Bedrock model returned no JSON array — raw: %.300s", text)
         return []
-
     try:
         parsed = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError as exc:
-        # Malformed JSON — log and skip rather than crash
-        _LOG.warning("Nova Lite JSON parse error (%s) — raw: %.400s", exc, text)
+    except json.JSONDecodeError as e:
+        _LOG.warning("Bedrock JSON parse error (%s) — raw: %.300s", e, text)
         return []
-
-    if not isinstance(parsed, list):
-        _LOG.warning("Nova Lite response was not a list — raw: %.400s", text)
-        return []
-
-    return parsed
+    return parsed if isinstance(parsed, list) else []
 
 
-# ── Entity validation ─────────────────────────────────────────────────────────
+# ── Validation ────────────────────────────────────────────────────────────────
 
-def validate_entities(items, taxonomy):
-    """
-    Filter Nova Lite's raw output and return only high-quality facts.
-
-    Rejects an item if any of the following are true:
-      - theme is not in the active taxonomy (unknown or inactive key)
-      - extracted_fact is shorter than MIN_FACT_CHARS or MIN_FACT_WORDS
-      - confidence_score is missing, non-numeric, non-finite, or < MIN_CONFIDENCE
-      - spatial_units is not a dict
-
-    Accepted items are normalised:
-      - theme is mapped to the canonical casing from the taxonomy
-      - spatial_units keys are lowercased; only district/taluk/village/town kept
-      - extracted_fact whitespace is collapsed
-    """
-    # Build a casefold lookup: "water_access" → "WATER_ACCESS"
+def validate_entities(items, taxonomy, source_text=""):
     active = {
-        item["entity_key"].casefold(): item["entity_key"]
-        for item in taxonomy
-        if item.get("is_active", True) and item.get("entity_key")
+        t["entity_key"].casefold(): t["entity_key"]
+        for t in active_taxonomy(taxonomy)
     }
-
     accepted = []
     for item in items:
         if not isinstance(item, dict):
             continue
-
-        # Validate theme against active taxonomy
         theme = active.get(str(item.get("theme") or "").strip().casefold())
         fact  = " ".join(str(item.get("extracted_fact") or "").split())
         if not theme or len(fact) < MIN_FACT_CHARS or len(fact.split()) < MIN_FACT_WORDS:
             continue
-
-        # Validate confidence score
+        source_excerpt = " ".join(str(item.get("source_excerpt") or "").split())
+        excerpt_words = source_excerpt.split()
+        normalized_source = " ".join(source_text.casefold().split())
+        if (
+            not 8 <= len(excerpt_words) <= 35
+            or len(source_excerpt) > 400
+            or " ".join(source_excerpt.casefold().split()) not in normalized_source
+        ):
+            continue
         try:
             confidence = float(item.get("confidence_score"))
         except (TypeError, ValueError):
             continue
         if not math.isfinite(confidence) or not MIN_CONFIDENCE <= confidence <= 1:
             continue
-
-        # Validate and normalise spatial_units
         raw_spatial = item.get("spatial_units") or {}
         if not isinstance(raw_spatial, dict):
             continue
         spatial = {
-            str(key).lower(): " ".join(value.split())
-            for key, value in raw_spatial.items()
-            if str(key).lower() in {"district", "taluk", "village", "town"}
-            and isinstance(value, str) and value.strip()
+            str(k).lower(): " ".join(v.split())
+            for k, v in raw_spatial.items()
+            if str(k).lower() in {"district", "taluk", "village", "town"}
+            and isinstance(v, str) and v.strip()
         }
-
         accepted.append({
-            "theme":            theme,
-            "extracted_fact":   fact,
-            "spatial_units":    spatial,
-            "temporal_period":  " ".join(str(item.get("temporal_period") or "").split()),
+            "theme":           theme,
+            "extracted_fact":  fact,
+            "source_excerpt":  source_excerpt,
+            "spatial_units":   spatial,
+            "temporal_period": " ".join(str(item.get("temporal_period") or "").split()),
             "confidence_score": confidence,
         })
-
     return accepted
 
 
-# ── Main extraction call ──────────────────────────────────────────────────────
+# ── Single chunk extraction with retry ───────────────────────────────────────
 
-def extract_chunk(chunk, taxonomy, bedrock_client, model_id="amazon.nova-lite-v1:0"):
-    """
-    Send one OCR text chunk to Nova Lite and return validated facts.
-
-    Retry logic:
-      Up to 4 attempts with exponential back-off (2s, 4s, 8s, 12s cap)
-      for ThrottlingException / TooManyRequestsException / ServiceUnavailableException.
-      Any other ClientError is re-raised immediately.
-
-    Returns a list of validated fact dicts (may be empty).
-    Raises ValueError if no active taxonomy entries exist.
-    """
-    if not any(item.get("is_active", True) for item in taxonomy):
-        raise ValueError("No active entity taxonomy is configured")
-
-    # Skip chunks that are too short — they produce unreliable Nova Lite responses
-    # (e.g. a page containing only a page number or a single heading)
-    if len(chunk.get("text", "")) < MIN_CHUNK_CHARS:
-        _LOG.info("Skipping short chunk page=%s chunk=%s (%d chars)",
-                  chunk.get("page"), chunk.get("chunk_index"), len(chunk.get("text", "")))
+def extract_chunk(chunk, taxonomy, bedrock_client, model_id=DEFAULT_MODEL_ID):
+    if not active_taxonomy(taxonomy):
+        raise ValueError("No active entity taxonomy configured")
+    if not chunk.get("text", "").strip():
         return []
 
-    request_body = {
-        "schemaVersion": "messages-v1",
-        "system": [{"text": build_system_prompt(taxonomy)}],
-        "messages": [{
-            "role": "user",
-            "content": [{
-                "text": (
-                    f"Page {chunk['page']} OCR excerpt follows. Extract only facts explicitly "
-                    f"supported by it.\n\n{chunk['text']}"
-                )
-            }],
+    page_info = f"Pages {chunk['page']}-{chunk.get('page_end', chunk['page'])}"
+    request_messages = [{
+        "role": "user",
+        "content": [{
+            "text": (
+                f"{page_info} OCR excerpt. Extract every useful fact explicitly supported "
+                f"by this excerpt. Return [] when it contains no theme-relevant facts.\n\n"
+                f"{chunk['text']}"
+            )
         }],
-        # Low temperature = more deterministic, less hallucination
-        "inferenceConfig": {"maxTokens": 1400, "temperature": 0.1},
-    }
+    }]
 
     for attempt in range(6):
         try:
-            response = bedrock_client.invoke_model(
+            response = bedrock_client.converse(
                 modelId=model_id,
-                body=json.dumps(request_body, ensure_ascii=False),
-                contentType="application/json",
-                accept="application/json",
+                system=[{"text": build_system_prompt(taxonomy)}],
+                messages=request_messages,
+                inferenceConfig={
+                    "maxTokens": 1800,
+                    "temperature": 0.1,
+                    "topP": 0.9,
+                },
             )
-            break  # success — exit retry loop
-        except ClientError as error:
-            code = error.response.get("Error", {}).get("Code", "")
-            retryable = {"ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException"}
-            if code not in retryable or attempt == 5:
-                raise  # non-retryable or exhausted retries
-            # Exponential back-off with jitter: 2s, 4s, 8s, 16s, 30s
-            # Jitter spreads retries from parallel threads so they don't all
-            # hit Bedrock at the same moment after a throttle.
+            break
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code not in {"ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException"} or attempt == 5:
+                raise
             import random
-            sleep_time = min(2 ** (attempt + 1), 30) + random.uniform(0, 2)
-            _LOG.info("Throttled on attempt %d — sleeping %.1fs", attempt + 1, sleep_time)
-            time.sleep(sleep_time)
+            sleep = min(2 ** (attempt + 1), 30) + random.uniform(0, 2)
+            _LOG.info("Throttled attempt %d — sleeping %.1fs", attempt + 1, sleep)
+            time.sleep(sleep)
 
-    raw_text = _response_text(response)
-    _LOG.debug("Nova Lite raw response (page %s chunk %s): %.300s",
-               chunk.get("page"), chunk.get("chunk_index"), raw_text)
-    return validate_entities(_parse_json_array(raw_text), taxonomy)
+    raw = _response_text(response)
+    return validate_entities(_parse_json_array(raw), taxonomy, chunk["text"])
+
+
+# ── Sequential extraction over all chunks ────────────────────────────────────
+
+def extract_chunks_sequential(chunks, taxonomy, bedrock_client, model_id=DEFAULT_MODEL_ID):
+    """
+    Submit each OCR chunk to Bedrock in order, without dropping failed chunks.
+    """
+    results = []
+    for index, chunk in enumerate(chunks, start=1):
+        _LOG.info(
+            "Extracting chunk %d/%d (pages %s-%s)",
+            index, len(chunks), chunk["page"], chunk.get("page_end", chunk["page"]),
+        )
+        facts = extract_chunk(chunk, taxonomy, bedrock_client, model_id)
+        _LOG.info("Chunk %d/%d: %d facts", index, len(chunks), len(facts))
+        results.append((chunk, facts))
+    return results
