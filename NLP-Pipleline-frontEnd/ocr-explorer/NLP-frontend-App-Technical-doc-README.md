@@ -22,14 +22,18 @@ and tab access; each tab lives in `src/components/`.
 
 ## Interface details
 
-Tag dropdowns share `src/documentTags.js`. `AtlasTab.js` describes the planned Atlas
-workflow; it does not display a live map. The Database list and PDF panes use accessible
-resize handles. OCR Compare can resize both the dialog and its side-by-side panes.
+Tag dropdowns share `src/documentTags.js`. `AtlasTab.js` embeds the independent
+`jrf-task-atlas/frontend` app in a full-width iframe. It accepts only the configured
+Atlas origin and the iframe's own `contentWindow` when forwarding the signed-in token.
+The token is sent in a `postMessage`, never in the app URL. Set
+`REACT_APP_ATLAS_APP_URL` to the Vite development server (`http://localhost:5173`) or
+the deployed Atlas origin (`https://main.d1g1u8rtpgjn48.amplifyapp.com`). The Database list and PDF panes use accessible resize
+handles. OCR Compare can resize both the dialog and its side-by-side panes.
 
 Tab permissions control navigation in the UI. API permissions must also be enforced on
 the server; currently, the document delete route has a server-side admin check, while
 other retrieval routes retain their existing access behavior.
 
-For table schemas, API routes, and the future map design, see the repository
-[system guide](../../SYSTEM-GUIDE.md). For local setup, see the
+For table schemas, API routes, and the Atlas architecture, see the repository
+[system guide](../../SYSTEM-GUIDE.md) and [Atlas guide](../../jrf-task-atlas/README.md). For local setup, see the
 [frontend README](../NLP-Pipeline-Work-README.md).

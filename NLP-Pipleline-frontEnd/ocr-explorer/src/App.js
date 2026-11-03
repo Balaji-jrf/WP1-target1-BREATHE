@@ -52,7 +52,7 @@ function AppShell() {
   if (safeTab !== tab) setTab(safeTab);
 
   return (
-    <main className={`app-shell ${tab === 'llm' ? 'app-shell-fullframe' : ''} ${tab === 'database' ? 'app-shell-database' : ''}`}>
+    <main className={`app-shell ${tab === 'llm' ? 'app-shell-fullframe' : ''} ${tab === 'database' ? 'app-shell-database' : ''} ${tab === 'atlas' ? 'app-shell-atlas' : ''}`}>
       {tab !== 'llm' && (
         <header className="topbar">
           <div className="brand-mark">B</div>
@@ -83,7 +83,7 @@ function AppShell() {
       {tab === 'llm'      && can('llm')      && <LlmTab onBack={() => setTab('extract')} />}
       {tab === 'database' && can('database') && <DatabaseTab initialDocumentId={databaseDocumentId} />}
       {tab === 'taxonomy' && can('taxonomy') && <TaxonomyTab />}
-      {tab === 'atlas'    && can('atlas')    && <AtlasTab />}
+      {tab === 'atlas'    && can('atlas')    && <AtlasTab auth={auth} />}
       {tab === 'admin'    && isAdmin         && <AdminPanel />}
     </main>
   );

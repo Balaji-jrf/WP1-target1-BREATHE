@@ -1,7 +1,9 @@
 # BREATHE System Guide
 
-This guide explains the document archive in plain language. It describes the current
-data flow and the planned Atlas view; Atlas geocoding and map search are not built yet.
+This guide explains the document archive in plain language. The system currently has
+three frontend applications: Archive Lens for OCR and database review, a separate
+document-chat app, and the standalone Research Atlas. Atlas AWS resources and its
+Amplify frontend are deployed in `ap-southeast-2`.
 
 ## 1. What happens to a document
 
@@ -140,21 +142,66 @@ the same protected `JWT_SECRET` and the configured users-table name. It refuses 
 delete during OCR or AI processing. S3 errors are returned rather than reported as a
 successful delete.
 
-## 6. Atlas: planned next step
+## 6. Research Atlas microfrontend
 
-The Atlas tab is a placeholder for a future map. The intended work is:
+The Atlas is a separately built React/Vite app embedded by the Archive Lens tab. It
+reads approved facts from the existing retrieval API, while the parent app supplies
+the signed-in session through an origin- and iframe-source-checked `postMessage`
+handshake. The token is not placed in the iframe URL.
 
-1. Review and normalize location names from extracted facts.
-2. Resolve names to latitude/longitude with a geocoding service and store the result,
-   source, and confidence. Keep the original text so researchers can audit the match.
-3. Send uncertain or duplicate place matches to an admin/reviewer instead of silently
-   choosing a coordinate.
-4. Show confirmed places on a map. Selecting a place should show approved facts, their
-   document-specific page numbers, and links to the source documents.
-5. Add location search and filters for theme, period, document tag, and review status.
+```mermaid
+flowchart LR
+    U[Researcher] --> P[Archive Lens React app]
+    P -->|BREATHE_ATLAS_READY / BREATHE_ATLAS_AUTH| F[Atlas React/Vite iframe]
+    F -->|GET documents and approved records| R[Existing retrieval API]
+    F -->|POST place query| G[Atlas geocoding Lambda]
+    G --> L[Amazon Location place index]
+    L --> G
+    G -->|candidate coordinates, no writes| F
+    F -->|review and confirm candidate| R
+    R --> D[(Existing ExtractedRecords table)]
+    F --> M[Amazon Location map]
+```
 
-The map, geocoding provider, coordinate schema, and map permissions need a separate
-implementation decision before building this feature.
+The frontend supports approved fact browsing, place candidates from
+`spatial_units`, manual match review, source-document links, confirmed-geotag display,
+and resizable fact/map/detail panels. The parent iframe bridge is wired. AWS resources
+are deployed in `ap-southeast-2`: `jrf-task-atlas-map`,
+`jrf-task-atlas-place-index`, `jrf-task-atlas-geocode`, and the
+`jrf-task-atlas-api` HTTP API. The existing `jrf-task-ocr-retrieval` Lambda now
+validates and permission-gates additive geotag updates. The map API key and APIs
+allow both local Atlas development and the exact Amplify origin
+`https://main.d1g1u8rtpgjn48.amplifyapp.com`.
+
+An additive `geotag` list is stored on the existing fact item; no existing database
+fields or tables are replaced:
+
+```json
+{
+  "place_name": "Bidar",
+  "place_type": "district",
+  "label": "Bidar, Karnataka, India",
+  "latitude": 17.9,
+  "longitude": 77.5,
+  "provider": "Amazon Location Service",
+  "place_id": "provider-place-id",
+  "relevance": 0.94,
+  "status": "confirmed",
+  "updated_at": "2025-01-01T00:00:00Z"
+}
+```
+
+Only records with `review_status=approved` are loaded. Only geotags with
+`status=confirmed` are mapped. Search returns candidates only; a researcher explicitly
+selects “Review & add to map” before the frontend sends the additive `geotag` update to
+the existing record endpoint. The retrieval Lambda validates the shape and geographic
+coordinate ranges while preserving all other record fields.
+
+AWS resources use the `jrf-task-atlas-*` prefix. No existing DynamoDB records were
+changed by provisioning.
+Amazon Location map/search requests incur request-based usage charges. Future climate,
+IMD, land-surface-temperature, satellite, and remote-sensing layers should be added as independent Atlas data
+providers and must not overwrite historical record facts.
 
 ## 7. Optional Document AI Chat
 
@@ -170,3 +217,4 @@ storage path.
 - [Frontend notes](./NLP-Pipleline-frontEnd/NLP-Pipeline-Work-README.md)
 - [Backend routes and deployment](./textract-backend/NLP-Pipeline-Backend-README.md)
 - [Authentication and permissions](./textract-backend/AUTH-DEPLOYMENT-README.md)
+- [Atlas design and local setup](./jrf-task-atlas/README.md)
