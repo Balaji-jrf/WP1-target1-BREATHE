@@ -345,7 +345,7 @@ export default function OcrResults({ result, pageFilter, onPageFilterChange, onE
                   className={`ocr-figure-card${cc}${isActive(fig, 'figures') ? ' ocr-card-active' : ''}`}
                   {...cardProps(fig, 'figures')}>
                   {fig.image_url
-                    ? <img className="ocr-figure-image" src={fig.image_url} alt={`Figure page ${fig.page}`} loading="lazy" />
+                    ? <img className="ocr-figure-image" src={fig.image_url} alt={`Detected figure on page ${String(fig.page || 1).padStart(2, '0')}`} loading="lazy" />
                     : <div className="ocr-figure-preview"><span>▧</span></div>}
                   <div className="ocr-figure-info">
                     <span className="ocr-type-tag">Figure {i + 1}</span>
