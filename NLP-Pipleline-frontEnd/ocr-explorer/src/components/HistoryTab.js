@@ -234,6 +234,9 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoad
         <span className="hcard-name">{item.doc_name || item.filename}</span>
         {item.doc_tag && <span className="hcard-tag">{item.doc_tag}</span>}
       </div>
+      {/* ── Doc ID ── */}
+      <p className="hcard-id" style={{ fontWeight: 1000, fontSize: '0.75rem', color: 'black' }}  title={item.document_id}>DOC-ID · {item.document_id}</p>
+
 
       {/* ── Metadata chips ── */}
       <div className="hcard-meta-chips">
@@ -241,10 +244,10 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoad
           <span className="hcard-chip-icon">📄</span>
           {item.total_pages} pages
         </span>
-        <span className="hcard-chip hcard-chip-blocks">
+        {/* <span className="hcard-chip hcard-chip-blocks">
           <span className="hcard-chip-icon">T</span>
           {item.element_count?.toLocaleString()} blocks
-        </span>
+        </span> */}
         {size && (
           <span className="hcard-chip">
             <span className="hcard-chip-icon">⚖</span>
@@ -262,9 +265,6 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoad
           {formatDate(item.uploaded_at)}
         </span>
       </div>
-
-      {/* ── Doc ID ── */}
-      <p className="hcard-id" title={item.document_id}>ID · {item.document_id}</p>
 
       {/* ── Primary action buttons ── */}
       <div className="hcard-actions">
@@ -284,12 +284,12 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoad
 
       {/* ── Secondary actions ── */}
       <div className="hcard-secondary">
-        <button className="hcard-btn hcard-btn-database" onClick={() => onDatabase(item.document_id)} disabled={busy}>
+        {/* <button className="hcard-btn hcard-btn-database" onClick={() => onDatabase(item.document_id)} disabled={busy}>
           Database →
-        </button>
+        </button> */}
         {canDelete && (
           <button className="hcard-btn hcard-btn-delete" onClick={() => onDelete(item)} disabled={busy}>
-            {isDeleting ? <><span className="spinner" />Deleting…</> : '✕ Delete'}
+            {isDeleting ? <><span className="spinner" />Deleting…</> : '✕ Delete document'}
           </button>
         )}
       </div>
@@ -397,7 +397,6 @@ export default function HistoryTab({ onCountChange, onDatabase }) {
             Your centralized repository for historical archives. Browse processed documents, inspect extracted text, layouts, images and compare original files with AI outputs.
           </p>
         </div>
-        <button className="clear-btn" onClick={() => onDatabase?.('')}>Main Database</button>
         <button className="clear-btn" onClick={loadHistory} disabled={historyLoading}>
           {historyLoading ? 'Loading…' : '↻ Refresh'}
         </button>

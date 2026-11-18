@@ -62,7 +62,7 @@ function AppShell() {
           </div>
           <nav className="tab-nav">
             {can('extract')  && <button className={tab === 'extract'  ? 'tab active' : 'tab'} onClick={() => setTab('extract')}>Upload & Digitize</button>}
-            {can('history')  && <button className={tab === 'history'  ? 'tab active' : 'tab'} onClick={() => setTab('history')}>Document Library{historyCount > 0 && <span className="badge">{historyCount}</span>}</button>}
+            {can('history')  && <button className={tab === 'history'  ? 'tab active' : 'tab'} onClick={() => setTab('history')}>Document Library</button>}
             {can('llm')      && <button className={tab === 'llm'      ? 'tab active' : 'tab'} onClick={() => setTab('llm')}>Research Assistant ↗</button>}
             {can('database') && <button className={tab === 'database' ? 'tab active' : 'tab'} onClick={() => setTab('database')}>Knowledge Vault</button>}
             {can('atlas')    && <button className={tab === 'atlas'    ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>Knowledge Atlas</button>}
