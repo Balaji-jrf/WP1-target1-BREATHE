@@ -58,20 +58,19 @@ export default function ExtractTab() {
     <>
       <section className="intro">
         <div>
-          <p className="section-kicker">Historical Document Intelligence</p>
-          <h2>Digitise archival records<br /><em>into structured evidence.</em></h2>
+          <p className="section-kicker">Historical/Policy Document Intelligence</p>
+          <h2>Digitise Historical/Policy Documents<br /><em>into structured data.</em></h2>
           <p className="intro-copy">
-            Part of the BREATHE project's NLP pipeline for analysing historical policy documents,
-            archival material, speeches, and grey literature. Upload a scanned document — AWS Textract
-            extracts every text passage with page location, confidence score, and bounding coordinates,
-            ready for downstream NLP analysis and historical database creation.
+            Unlock deep historical insights from complex Historical/Policy archives. 
+            Upload documents to automatically capture text, tables, and visual records. 
+            Ask targeted questions with AI like Research Questions, doc summary, etc. Explore interconnected relationships across time, and build your digital repository effortlessly.
           </p>
         </div>
         <div className="intro-stats">
           <strong>01</strong><span>Upload Historical<br />Document</span>
-          <strong>02</strong><span>Extract<br />Text, Layouts, Tables, Images</span>
-          <strong>03</strong><span>Feed<br />LLM Pipeline</span>
-          <strong>04</strong><span>Going<br />On</span>
+          <strong>02</strong><span>Extract<br />Text, Layouts, Tables & Images</span>
+          <strong>03</strong><span>AI Extraction, <br />DISCOVER & CHAT WITH AI</span>
+          <strong>04</strong><span>EXPLORE<br />KNOWLEDGE GRAPH</span>
         </div>
       </section>
 
@@ -136,7 +135,7 @@ export default function ExtractTab() {
           )}
 
           <div className="action-row">
-            <p className="limit-note"><span className="lock-icon">◈</span> Processed via Amazon Textract (OCR Engine) + LLM Pipeline · Stored securely in S3 + DynamoDB</p>
+            <p className="limit-note"><span className="lock-icon">◈</span>Processed with OCR Engine (Artifical Eye)</p>
             <button className="process-button" type="submit" disabled={!file || loading}>
               {loading ? <><span className="spinner" /> {loadingMsg}</> : <>Extract text <span>→</span></>}
             </button>

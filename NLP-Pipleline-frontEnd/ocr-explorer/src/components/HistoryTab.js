@@ -359,9 +359,9 @@ export default function HistoryTab({ onCountChange, onDatabase }) {
     <section className="history-panel">
       <div className="history-header">
         <div>
-          <h2 className="history-title">Processed Documents</h2>
+          <h2 className="history-title">Document Library</h2>
           <p className="intro-copy">
-            Browse all extracted documents, OCR output JSON. <br></br>View the original file, read the OCR text, layouts, tables, images <br></br>Use Compare to see both side-by-side, understand better
+            Your centralized repository for historical archives. Browse processed documents, inspect extracted text, layouts, images and compare original files with AI outputs.
           </p>
         </div>
         <button className="clear-btn" onClick={() => onDatabase?.('')}>Main Database</button>

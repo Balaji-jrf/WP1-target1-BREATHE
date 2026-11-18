@@ -57,17 +57,17 @@ function AppShell() {
         <header className="topbar">
           <div className="brand-mark">B</div>
           <div>
-            <p className="eyebrow">BREATHE · WP1 · NLP PIPELINE</p>
-            <h1>Archive Lens</h1>
+            <p className="eyebrow">BREATHE · WP1</p>
+            <h1>ArchiveLens</h1>
           </div>
           <nav className="tab-nav">
-            {can('extract')  && <button className={tab === 'extract'  ? 'tab active' : 'tab'} onClick={() => setTab('extract')}>Input Extract</button>}
-            {can('history')  && <button className={tab === 'history'  ? 'tab active' : 'tab'} onClick={() => setTab('history')}>OCR History {historyCount > 0 && <span className="badge">{historyCount}</span>}</button>}
-            {can('llm')      && <button className={tab === 'llm'      ? 'tab active' : 'tab'} onClick={() => setTab('llm')}>Chat with AI ↗</button>}
-            {can('database') && <button className={tab === 'database' ? 'tab active' : 'tab'} onClick={() => setTab('database')}>AI-Extraction &amp; Database</button>}
-            {can('taxonomy') && <button className={tab === 'taxonomy' ? 'tab active' : 'tab'} onClick={() => setTab('taxonomy')}>Active entity taxonomy</button>}
-            {can('atlas')    && <button className={tab === 'atlas'    ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>Atlas</button>}
-            {isAdmin         && <button className={tab === 'admin'    ? 'tab active' : 'tab'} onClick={() => setTab('admin')}>⚙ Users</button>}
+            {can('extract')  && <button className={tab === 'extract'  ? 'tab active' : 'tab'} onClick={() => setTab('extract')}>Upload & Digitize</button>}
+            {can('history')  && <button className={tab === 'history'  ? 'tab active' : 'tab'} onClick={() => setTab('history')}>Document Library{historyCount > 0 && <span className="badge">{historyCount}</span>}</button>}
+            {can('llm')      && <button className={tab === 'llm'      ? 'tab active' : 'tab'} onClick={() => setTab('llm')}>Research Assistant ↗</button>}
+            {can('database') && <button className={tab === 'database' ? 'tab active' : 'tab'} onClick={() => setTab('database')}>Knowledge Vault</button>}
+            {can('atlas')    && <button className={tab === 'atlas'    ? 'tab active' : 'tab'} onClick={() => setTab('atlas')}>Knowledge Atlas</button>}
+            {can('taxonomy') && <button className={tab === 'taxonomy' ? 'tab active' : 'tab'} onClick={() => setTab('taxonomy')}>Entity Schema</button>}
+            {isAdmin         && <button className={tab === 'admin'    ? 'tab active' : 'tab'} onClick={() => setTab('admin')}>Users</button>}
           </nav>
           <div className="topbar-user">
             <span className="user-chip">{auth.username} {isAdmin && <span className="user-role-badge">admin</span>}</span>
