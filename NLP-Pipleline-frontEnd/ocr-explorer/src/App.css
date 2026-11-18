@@ -230,27 +230,103 @@
 .empty-history { padding: 60px 0; color: #78867e; font: 13px/1.8 'DM Mono', monospace; }
 .history-filters { display: flex; align-items: center; gap: 10px; margin: -18px 0 20px; color: #78867e; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
 .history-filters select { min-width: 220px; padding: 8px 10px; border: 1px solid #d9d7cd; border-radius: 5px; background: #fffefa; color: #183a30; font: 11px 'DM Mono', monospace; }
-.history-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 40px; }
-.history-card { border: 1px solid #d9d7cd; padding: 18px 20px; cursor: pointer; transition: .15s; background: rgba(255,255,255,.5); }
-.history-card:hover { border-color: #d46a46; background: #faf8f2; }
-.history-card.is-selected { border-color: #183a30; background: #f0f4f0; box-shadow: 0 0 0 2px #183a30; }
-.hcard-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
-.hcard-name { font: 500 15px 'Fraunces', serif; overflow-wrap: anywhere; }
-.hcard-tag { display: inline-block; margin: 0 0 8px; padding: 3px 7px; border-radius: 10px; background: #e8ece6; color: #4e6959; font: 9px 'DM Mono', monospace; }
-.hcard-pages { font: 500 11px 'DM Mono', monospace; color: #d46a46; flex-shrink: 0; }
-.hcard-meta { display: flex; justify-content: space-between; font: 10px 'DM Mono', monospace; color: #87928b; text-transform: uppercase; margin-bottom: 6px; }
-.hcard-id { margin: 0 0 12px; font: 9px 'DM Mono', monospace; color: #b0bab5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hcard-actions { display: flex; gap: 8px; margin-top: 4px; }
-.hcard-btn { flex: 1; border: 1px solid #cdd4cd; background: transparent; padding: 7px 10px; font: 500 9px 'DM Mono', monospace; letter-spacing: .07em; text-transform: uppercase; cursor: pointer; color: #183a30; transition: .15s; display: flex; align-items: center; justify-content: center; gap: 4px; }
-.hcard-btn:hover:not(:disabled) { background: #183a30; color: #f9f6ee; border-color: #183a30; }
-.hcard-btn:disabled { opacity: .5; cursor: not-allowed; }
-.hcard-btn-compare { border-color: #183a30 !important; color: #183a30 !important; }
-.hcard-btn-compare:hover:not(:disabled) { background: #d46a46 !important; border-color: #d46a46 !important; color: #fff !important; }
-.hcard-btn-download { border-color: #4a7a5a !important; color: #4a7a5a !important; }
-.hcard-btn-download:hover:not(:disabled) { background: #4a7a5a !important; border-color: #4a7a5a !important; color: #fff !important; }
-.hcard-btn-database { flex-basis: 100%; }
-.hcard-btn-delete { flex-basis: 100%; border-color: #c84e3d; color: #963e32; }
-.hcard-btn-delete:hover:not(:disabled) { background: #963e32; border-color: #963e32; color: #fff; }
+.history-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-bottom: 40px; }
+
+/* ── History Card ── */
+.history-card {
+  border: 1px solid #dde4db;
+  border-radius: 14px;
+  padding: 18px 18px 14px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.history-card:hover { border-color: #b8c8b9; box-shadow: 0 4px 18px rgba(24,58,48,.07); }
+.history-card.is-selected { border-color: #183a30; box-shadow: 0 0 0 2px #183a30; }
+
+/* Title + tag */
+.hcard-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.hcard-name { font: 500 14px/1.4 'Fraunces', serif; color: #183a30; overflow-wrap: anywhere; flex: 1; }
+.hcard-tag {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 20px;
+  background: #f0f5ef;
+  color: #315641;
+  font: 600 8px 'DM Mono', monospace;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Metadata chips */
+.hcard-meta-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.hcard-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f5f7f4;
+  border: 1px solid #e5e9e2;
+  color: #566660;
+  font: 10px 'DM Mono', monospace;
+  white-space: nowrap;
+}
+.hcard-chip-icon { font-size: 11px; opacity: .7; }
+.hcard-chip-pages  { background: #edf3ed; border-color: #ccdacc; color: #315641; font-weight: 600; }
+.hcard-chip-blocks { background: #f3f0fa; border-color: #d9d0f0; color: #5a4a8a; }
+.hcard-chip-date   { background: #f8f6f0; border-color: #e0dbd0; color: #7a6a50; }
+
+/* Doc ID */
+.hcard-id { margin: 0; font: 8.5px 'DM Mono', monospace; color: #b8c2bd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Primary 2×2 button grid */
+.hcard-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.hcard-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 9px 8px;
+  border-radius: 8px;
+  border: 1px solid #d9e1d8;
+  background: #fafcfa;
+  color: #26372f;
+  font: 600 9px 'DM Mono', monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background .13s, border-color .13s, color .13s, box-shadow .13s;
+  white-space: nowrap;
+}
+.hcard-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.hcard-btn-doc:hover:not(:disabled)      { background: #183a30; border-color: #183a30; color: #f9f6ee; box-shadow: 0 2px 8px rgba(24,58,48,.18); }
+.hcard-btn-ocr:hover:not(:disabled)      { background: #2d5a46; border-color: #2d5a46; color: #f9f6ee; box-shadow: 0 2px 8px rgba(45,90,70,.18); }
+.hcard-btn-compare:hover:not(:disabled)  { background: #d46a46; border-color: #d46a46; color: #fff;    box-shadow: 0 2px 8px rgba(212,106,70,.22); }
+.hcard-btn-download:hover:not(:disabled) { background: #4a7a5a; border-color: #4a7a5a; color: #fff;    box-shadow: 0 2px 8px rgba(74,122,90,.18); }
+
+/* Secondary row */
+.hcard-secondary { display: flex; gap: 6px; }
+.hcard-btn-database {
+  flex: 1;
+  background: #f0f5ef;
+  border-color: #c8d8c8;
+  color: #315641;
+  font-size: 9px;
+}
+.hcard-btn-database:hover:not(:disabled) { background: #315641; border-color: #315641; color: #fff; }
+.hcard-btn-delete {
+  flex-shrink: 0;
+  background: #fff4f2;
+  border-color: #f0c8c0;
+  color: #963e32;
+  font-size: 9px;
+}
+.hcard-btn-delete:hover:not(:disabled) { background: #c84e3d; border-color: #c84e3d; color: #fff; }
 
 /* ── Footer ── */
 footer { margin-top: 75px; color: #9ba49e; font: 9px 'DM Mono', monospace; letter-spacing: .12em; }

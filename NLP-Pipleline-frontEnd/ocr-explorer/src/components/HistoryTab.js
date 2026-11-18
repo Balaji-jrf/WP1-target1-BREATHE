@@ -225,42 +225,75 @@ function HistoryCard({ item, onViewDoc, onViewOcr, onCompare, onDatabase, isLoad
   const size = formatSize(item.file_size_bytes);
   const time = formatTime(item.processing_time_seconds);
   const busy = isLoading || isDownloading || deletionInProgress;
+
   return (
     <div className={`history-card ${isLoading ? 'is-selected' : ''}`}>
+
+      {/* ── Title row ── */}
       <div className="hcard-top">
-        <span className="hcard-name">Doc - {item.doc_name || item.filename}</span>
-        <span className="hcard-pages">{item.total_pages}-pages</span>
+        <span className="hcard-name">{item.doc_name || item.filename}</span>
+        {item.doc_tag && <span className="hcard-tag">{item.doc_tag}</span>}
       </div>
-      {item.doc_tag && <span className="hcard-tag">{item.doc_tag}</span>}
-      <div className="hcard-meta">
-        <span>{item.element_count} text blocks</span>
-        {size && <span>📄 {size}</span>}
-        {time && <span>⏱ {time}</span>}
-        <span>{formatDate(item.uploaded_at)}</span>
+
+      {/* ── Metadata chips ── */}
+      <div className="hcard-meta-chips">
+        <span className="hcard-chip hcard-chip-pages">
+          <span className="hcard-chip-icon">📄</span>
+          {item.total_pages} pages
+        </span>
+        <span className="hcard-chip hcard-chip-blocks">
+          <span className="hcard-chip-icon">T</span>
+          {item.element_count?.toLocaleString()} blocks
+        </span>
+        {size && (
+          <span className="hcard-chip">
+            <span className="hcard-chip-icon">⚖</span>
+            {size}
+          </span>
+        )}
+        {time && (
+          <span className="hcard-chip">
+            <span className="hcard-chip-icon">⏱</span>
+            {time}
+          </span>
+        )}
+        <span className="hcard-chip hcard-chip-date">
+          <span className="hcard-chip-icon">🗓</span>
+          {formatDate(item.uploaded_at)}
+        </span>
       </div>
-      <p className="hcard-id">Doc-ID - {item.document_id}</p>
+
+      {/* ── Doc ID ── */}
+      <p className="hcard-id" title={item.document_id}>ID · {item.document_id}</p>
+
+      {/* ── Primary action buttons ── */}
       <div className="hcard-actions">
-        <button className="hcard-btn" onClick={() => onViewDoc(item.document_id)} disabled={busy}>
-          {isLoading ? <><span className="spinner" /> …</> : '⊞ Doc'}
+        <button className="hcard-btn hcard-btn-doc" onClick={() => onViewDoc(item.document_id)} disabled={busy} title="View original document">
+          {isLoading ? <><span className="spinner" />Loading</> : <><span>⊞</span> Doc</>}
         </button>
-        <button className="hcard-btn" onClick={() => onViewOcr(item.document_id)} disabled={busy}>
-          {isLoading ? <><span className="spinner" /> …</> : '≡ OCR'}
+        <button className="hcard-btn hcard-btn-ocr" onClick={() => onViewOcr(item.document_id)} disabled={busy} title="View OCR extraction">
+          {isLoading ? <><span className="spinner" />Loading</> : <><span>≡</span> OCR</>}
         </button>
-        <button className="hcard-btn hcard-btn-compare" onClick={() => onCompare(item.document_id)} disabled={busy}>
-          {isLoading ? <><span className="spinner" /> …</> : '⧉ Compare'}
+        <button className="hcard-btn hcard-btn-compare" onClick={() => onCompare(item.document_id)} disabled={busy} title="Compare document and OCR side by side">
+          {isLoading ? <><span className="spinner" />Loading</> : <><span>⧉</span> Compare</>}
         </button>
-        <button className="hcard-btn hcard-btn-download" onClick={() => onDownload(item.document_id)} disabled={busy}>
-          {isDownloading ? <><span className="spinner" /> …</> : '⬇ JSON'}
+        <button className="hcard-btn hcard-btn-download" onClick={() => onDownload(item.document_id)} disabled={busy} title="Download OCR JSON">
+          {isDownloading ? <><span className="spinner" />Saving</> : <><span>⬇</span> JSON</>}
         </button>
       </div>
-        <button className="hcard-btn hcard-btn-download hcard-btn-database" onClick={() => onDatabase(item.document_id)} disabled={busy}>
-          Database
+
+      {/* ── Secondary actions ── */}
+      <div className="hcard-secondary">
+        <button className="hcard-btn hcard-btn-database" onClick={() => onDatabase(item.document_id)} disabled={busy}>
+          Database →
         </button>
         {canDelete && (
           <button className="hcard-btn hcard-btn-delete" onClick={() => onDelete(item)} disabled={busy}>
-            {isDeleting ? <><span className="spinner" /> Deleting…</> : 'Delete document'}
+            {isDeleting ? <><span className="spinner" />Deleting…</> : '✕ Delete'}
           </button>
         )}
+      </div>
+
     </div>
   );
 }
